@@ -107,7 +107,8 @@ Repeat forever:
    ```
    If this fails (network error, auth expiry), log the error and continue to the next tick.
 
-2. Filter: only process messages where `bot_id` is null and `text` does not start with `_`.
+2. Filter: exclude messages where `text` starts with `[ongo]` or `_[ongo]` (your own messages).
+   Process everything else — including messages from other bots/agents.
    Sort filtered messages by `ts` ascending.
 
 3. **If there are new messages**:
