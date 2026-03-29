@@ -1,0 +1,14 @@
+{
+  "name": "ongo",
+  "owner": {
+    "name": "zomglings"
+  },
+  "plugins": [
+    {
+      "name": "ongo",
+      "source": "./plugins/ongo",
+      "version": "0.1.0",
+      "description": "Autonomous ongoing research agent — reads requests from Slack, tracks research in kendb, self-improves"
+    }
+  ]
+}
