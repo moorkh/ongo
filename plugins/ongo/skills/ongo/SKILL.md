@@ -144,7 +144,7 @@ Interpret all messages as natural language. The user might ask to:
   notes), respond with a summary. If a ken command fails, log the error to Slack and continue.
 - **Manage kendb** — query with `ken list`, report results
 - **Update exploration strategy** — add/update `ongo-exploration` entries in kendb
-- **Trigger self-improvement** — run the self-improvement cycle (A, B, C, or all)
+- **Trigger self-improvement** — run any single layer (A, B, C, D, or E) or all of them
 - **Anything else** — use your judgment
 
 ## Auto-Expansion
