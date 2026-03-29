@@ -86,8 +86,7 @@ If `--channel` provided:
 clacks send -c "$CHANNEL" -m "_[ongo] Research agent active in $(pwd)_"
 ```
 
-Record the current timestamp as LAST_TS. Record the current time as LAST_SELF_IMPROVE_TIME and
-LAST_EXPANSION_TIME.
+Record the current timestamp as LAST_TS. Record the current time as LAST_SELF_IMPROVE_TIME.
 
 ## Main Loop
 
@@ -118,8 +117,7 @@ Repeat forever:
      - Process the message (see "Processing Messages" below)
      - Send your response via `clacks send -c "$CHANNEL" -m "[ongo] <response>"`
 
-4. **If no new messages AND idle mode is on**: check if at least 5 minutes have passed since
-   LAST_EXPANSION_TIME. If so, run idle expansion (see below) and update LAST_EXPANSION_TIME.
+4. **If no new messages AND idle mode is on**: run idle expansion (see below).
 
 5. **If 24 hours have passed since LAST_SELF_IMPROVE_TIME**, or the user asked for it:
    - Run the self-improvement cycle (see below)
