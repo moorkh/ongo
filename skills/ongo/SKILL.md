@@ -237,6 +237,8 @@ filter), do not modify the Self-Improvement section's constraints.
 
 ## Message Format
 
-- Prepend `[ongo]` to all messages you send to Slack
+- **Always** prepend `[ongo]` to every message you send to Slack — no exceptions. This is how the
+  polling loop identifies and filters out your own messages. If you forget the prefix, you will
+  process your own responses as user messages and create an infinite loop.
 - Truncate responses over 30000 characters
 - Use italic formatting (`_..._`) for status messages
