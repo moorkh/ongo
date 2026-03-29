@@ -87,7 +87,7 @@ Interpret as natural language. The user might ask to:
 
 ## Auto-Expansion
 
-**Delegate to an intelligent subagent** (model: opus). The main loop stays lean — it only picks a topic and launches the agent. The subagent self-loads its own context from kendb.
+**Delegate to an intelligent subagent** using the most capable available model (opus at time of writing — check for newer models during self-improvement). The main loop stays lean — it only picks a topic and launches the agent. The subagent self-loads its own context from kendb.
 
 1. Load only the topic list and exploration directives (lightweight):
    ```bash
