@@ -124,6 +124,8 @@ The main loop is driven by **CronCreate** — each tick fires as an independent 
 
 **CRITICAL — Cron renewal**: CronCreate jobs auto-expire after 7 days. To ensure ongo **never stops looping**, every tick must check `cron_created` in state. If 3 days (259200 seconds) have passed since cron creation, **renew the cron job**: delete the old one via CronDelete, create a fresh one via CronCreate with the same expression and prompt, update `cron_id` and `cron_created` in state. Track each renewal in kendb as an `ongo-cron-reset` publication. **The loop must never be allowed to expire.**
 
+Do NOT preemptively shut down for context concerns — each tick is a fresh context. Only shut down on explicit user command (`/quit`, `/stop`, `/exit`).
+
 ### Tick (cron-fired)
 
 Each tick is self-contained. It reads state from `/tmp/ongo_state.json`, executes, and writes state back.
@@ -154,7 +156,11 @@ Interpret as natural language. The user might ask to:
 - **Trigger self-improvement** — run any single layer (A–E) or all
 - **Anything else** — use judgment
 
+Prefer delegating heavyweight research requests to subagents using the most capable available model (opus at time of writing — check for newer models during self-improvement) with the self-contextualization pattern below. Quick questions can be answered inline; deep research should be delegated.
+
 ## Auto-Expansion
+
+**Delegate to an intelligent subagent** using the most capable available model. The main loop stays lean — it only picks a topic, checks memory, and launches the agent. The subagent self-loads its own context from kendb.
 
 **CRITICAL — Memory check before spawning subagents**: Before launching ANY subagent (auto-expansion or user-triggered), check available free memory via `free -m | awk '/^Mem:/ {print $7}'` (returns available MiB).
 
@@ -167,15 +173,42 @@ Three thresholds:
 
 Rationale: subagents (especially Opus) have substantial memory footprints. Running under memory pressure risks OOM, which kills the whole session and breaks the loop. The loop must never stop — it is better to skip a tick than crash the agent.
 
-1. **Memory check**: `free -m | awk '/^Mem:/ {print $7}'` — apply the three-threshold rule above.
-2. Load strategy and topics:
+1. **Memory check**: `free -m | awk '/^Mem:/ {print $7}'` — apply the three-threshold rule above. Skip or downgrade as required.
+2. Load only the topic list and exploration directives (lightweight):
    ```bash
    ${CLAUDE_SKILL_DIR}/bin/ken list --kind ongo-exploration
    ${CLAUDE_SKILL_DIR}/bin/ken list --kind topic
    ```
 3. Pick a topic **randomly**, weighted by `ongo-exploration` directives. Skip if no topics.
-4. Research new related work, add findings to kendb with relationships.
-5. Report: `_[ongo] Expanded research on: <topic title>_`
+4. **Launch a subagent** (via the Agent tool with the appropriate model for the current memory tier and `run_in_background: true`) whose prompt contains only:
+   - The topic title and ID
+   - The ken binary path: `${CLAUDE_SKILL_DIR}/bin/ken`
+   - The clacks channel ID
+   - The **self-contextualization instructions** below
+
+**Subagent self-contextualization instructions** (include verbatim in the prompt):
+
+> You are an ongo research expansion agent. Before doing any research, build your context from kendb:
+>
+> 1. Run `KEN list --kind topic` to see all topics and their IDs.
+> 2. Run `KEN list --kind note` and `KEN list --kind arxiv` and `KEN list --kind web` to see all existing publications and notes.
+> 3. Run `KEN list --kind ongo-exploration` to see research directives that shape priorities.
+> 4. Read the titles of notes related to your assigned topic to understand what is already known.
+>
+> Then act as a **research analyst**:
+> - Identify gaps in the existing knowledge for this topic.
+> - Search the web for new work, recent papers, and developments.
+> - Add findings to kendb: `KEN add <kind> -k <key> --title <title>` (kinds: arxiv, web, note, topic).
+> - Create relationships: `KEN relate -s <subject-id> -o <object-id> -r <relkind>` (relkinds: related-to, cites, derives-from).
+> - Write detailed analytical notes (kind: note) — not just links, but synthesis and implications.
+> - Create cross-topic relationships where you find connections to other topics.
+> - Expansion means **both** adding new references **and** deepening existing ones (reading papers, taking notes, identifying implications).
+>
+> When done, report via: `clacks send -c "CHANNEL" -m "_[ongo] Expanded research on: <topic title> — <summary>_"`
+>
+> (Replace KEN and CHANNEL with the actual paths/IDs provided.)
+
+5. Continue the main loop immediately — do NOT wait for the expansion agent to finish.
 
 ## Self-Improvement
 
@@ -223,7 +256,7 @@ Review past attempts: `${CLAUDE_SKILL_DIR}/bin/ken list --kind ongo-self-improve
 
 File issues/PRs against tools (ken, clacks, etc.) when you hit bugs or missing features. Track as `ongo-self-improvement` entries keyed by issue/PR URL. On subsequent cycles, check status via `gh issue view`/`gh pr view` and update notes. Record rejection reasons to inform future attempts.
 
-**Constraints**: Do not remove shutdown commands, reduce polling below 1s, remove error handling, weaken dedup (`ts > LAST_TS` filter), or modify these constraints.
+**Constraints**: Do not remove shutdown commands, remove error handling, weaken dedup (`ts > LAST_TS` filter), or modify these constraints.
 
 ## Message Format
 
