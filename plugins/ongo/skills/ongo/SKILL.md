@@ -53,6 +53,10 @@ ${CLAUDE_SKILL_DIR}/bin/ken pubkind show ongo-self-improvement 2>/dev/null || ${
 ${CLAUDE_SKILL_DIR}/bin/ken pubkind show ongo-cron-reset 2>/dev/null || ${CLAUDE_SKILL_DIR}/bin/ken pubkind add ongo-cron-reset "A record of a CronCreate renewal. The key is a timestamp. The title records the old and new cron job IDs. Ongo must renew its cron job every 3 days to prevent the 7-day auto-expiry from killing the loop."
 ```
 
+```bash
+${CLAUDE_SKILL_DIR}/bin/ken pubkind show ongo-web 2>/dev/null || ${CLAUDE_SKILL_DIR}/bin/ken pubkind add ongo-web "Publish marker for the static site. The key is the target publication's id (or its key), the title is the display/nav label, and an optional notes body overrides the section/topic heading. Only items referenced by an ongo-web entry appear on the generated site (see bin/ongo-site)."
+```
+
 **Registration is not durable — every `ken add <customkind>` must be idempotent.** Startup registration above happens once, but each tick and each subagent runs in a fresh context and may operate against a kendb instance where the custom kind is not registered (this was observed in production: `ken add ongo-cron-reset` failed mid-run because the pubkind was missing from that kendb instance and had to be re-registered by hand). Therefore **never call `ken add <customkind> …` bare.** Always ensure the pubkind first, in the same step:
 
 ```bash
@@ -346,6 +350,7 @@ Every 24h or on request. Five layers, all run together:
 - **Importance** — topic centrality by connection count
 - **Kind evolution** — new `pubkind` if needed
 - **Stale directives** — review `ongo-exploration`, flag outdated on Slack. Use `ongo-delete pub --kind ongo-exploration` (with `--dry-run` first) to remove directives that are no longer relevant, or `ongo-delete pub <id>` to remove individual stale entries.
+- **Regenerate the published site** — run `${CLAUDE_SKILL_DIR}/bin/ongo-site` to rebuild the static site from the `ongo-web` publish set. It is idempotent, deterministic, and rewrites the output dir cleanly, so it is safe to run every cycle. Hosting is self-served (`bin/ongo-serve`) on the user's own server; **DNS is the user's manual step — ongo never performs DNS or deploys.**
 
 ### B. Dependency updates
 
@@ -404,3 +409,34 @@ ongo-delete --dry-run ...         # Preview without deleting
 ```
 
 Always use `--dry-run` first when deleting by `--kind` to avoid accidentally removing wanted entries. The script handles the ON DELETE RESTRICT constraint on relationships by deleting them before the publication.
+
+### Static site
+
+The `ongo-web` publication kind is the **publish marker**: an `ongo-web`
+entry's key = the target note/publication id (or its key), title = the
+display/nav label, and an optional notes body = a section heading override.
+**Nothing appears on the site unless an `ongo-web` entry references it**, so
+the published surface is always explicit and queryable. Mark a note for
+publish with the idempotent ensure-pubkind-then-add pattern from Startup
+step 3:
+
+```bash
+${CLAUDE_SKILL_DIR}/bin/ken pubkind show ongo-web 2>/dev/null || ${CLAUDE_SKILL_DIR}/bin/ken pubkind add ongo-web "<description from startup>"
+${CLAUDE_SKILL_DIR}/bin/ken add ongo-web -k "<note-id>" --title "<nav title>"
+```
+
+`${CLAUDE_SKILL_DIR}/bin/ongo-site` generates a self-contained static site
+(default `./site/`) from the publish set: a top index grouping items by
+their kendb topic graph, plus per-item HTML pages with an embedded CSS
+theme and no external assets. It is stdlib-only, idempotent, and
+deterministic — it **regenerates each self-improvement cycle** (see
+Self-Improvement layer A). Cross-links between published notes resolve to
+their pages; links to unpublished notes degrade to plain text so
+unpublished content is never leaked.
+
+`${CLAUDE_SKILL_DIR}/bin/ongo-serve` serves the generated directory via
+`python3 -m http.server` (default `0.0.0.0:8080`). Hosting is
+**self-served on the user's own server** (see `deploy/README.md` and the
+`deploy/ongo-site.service` systemd template). The user points DNS
+(`ongo.ergodic.xyz`) at their server **manually** — the skill must never
+perform DNS changes or deploys.

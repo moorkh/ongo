@@ -1,0 +1,6 @@
+# Generated static site (produced by bin/ongo-site; never committed)
+site/
+
+# Python bytecode caches
+__pycache__/
+*.pyc

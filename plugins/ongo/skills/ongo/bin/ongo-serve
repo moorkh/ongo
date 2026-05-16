@@ -1,0 +1,57 @@
+#!/usr/bin/env python3
+"""ongo-serve — Serve a generated ongo-site directory over HTTP.
+
+Thin wrapper around `python3 -m http.server` rooted at the site directory.
+For production, run this behind a reverse proxy (nginx/caddy) and/or under
+systemd (see deploy/ongo-site.service and deploy/README.md); the user points
+DNS (ongo.ergodic.xyz) at their server MANUALLY — this script never touches
+DNS or deploys anything.
+
+Usage:
+    ongo-serve [--dir DIR] [--host HOST] [--port PORT]
+
+Defaults: --dir ./site  --host 0.0.0.0  --port 8080
+"""
+
+import argparse
+import os
+import sys
+
+
+def main(argv=None):
+    p = argparse.ArgumentParser(
+        prog="ongo-serve",
+        description="Serve a generated ongo-site directory over HTTP.",
+    )
+    p.add_argument("--dir", default="./site", help="site directory")
+    p.add_argument("--host", default="0.0.0.0", help="bind host")
+    p.add_argument("--port", type=int, default=8080, help="bind port")
+    args = p.parse_args(argv)
+
+    site_dir = os.path.abspath(args.dir)
+    if not os.path.isdir(site_dir):
+        sys.stderr.write(
+            f"error: site directory not found: {site_dir}\n"
+            "hint: run bin/ongo-site first to generate it.\n"
+        )
+        return 1
+
+    from http.server import HTTPServer, SimpleHTTPRequestHandler
+    from functools import partial
+
+    handler = partial(SimpleHTTPRequestHandler, directory=site_dir)
+    httpd = HTTPServer((args.host, args.port), handler)
+    sys.stdout.write(
+        f"ongo-serve: serving {site_dir} at "
+        f"http://{args.host}:{args.port}/ (Ctrl-C to stop)\n"
+    )
+    try:
+        httpd.serve_forever()
+    except KeyboardInterrupt:
+        sys.stdout.write("\nongo-serve: stopped\n")
+        httpd.server_close()
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

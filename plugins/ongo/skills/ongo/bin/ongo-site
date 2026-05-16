@@ -1,0 +1,748 @@
+#!/usr/bin/env python3
+"""ongo-site — Generate a self-contained static site from a kendb publish set.
+
+Nothing appears on the site unless an `ongo-web` publication references it.
+An `ongo-web` entry is the *publish marker*:
+
+    key   = the target publication's id  (or its key)
+    title = the display title / nav label for the site
+    notes = optional section/topic override (read from the kendb notes table)
+
+The generator:
+  1. Reads the publish set via `ken list --kind ongo-web`.
+  2. Resolves each marker to a source publication and its body. Bodies come
+     from (in order): a filesystem .md/.pdf/.tex named by the publication key,
+     a slug -> ~/.local/share/ken/notes/<slug>.md or research-notes/**.md
+     match, the kendb `notes` table body, or finally the publication title.
+  3. Groups published items under their kendb topic(s) (topic publications +
+     `related-to` / `cites` / `derives-from` relationships) into a clean index.
+  4. Emits a deterministic, self-contained static directory (default ./site/)
+     with an embedded CSS theme and no external assets.
+
+Stdlib only. Safe to run every self-improvement cycle: it rewrites the output
+directory cleanly and produces deterministic output.
+
+Usage:
+    ongo-site [--ken PATH] [--db PATH] [--out DIR] [--site-title TITLE]
+              [--base-url URL]
+
+The ken binary path may also be set via the KEN env var. The kendb path
+defaults to ~/.local/share/ken/ken.db (respects XDG_DATA_HOME).
+"""
+
+import argparse
+import glob
+import html
+import json
+import os
+import re
+import shutil
+import sqlite3
+import subprocess
+import sys
+
+
+DEFAULT_KEN = "/home/claude/.claude/plugins/cache/ongo/ongo/0.1.0/skills/ongo/bin/ken"
+
+# Relationship kinds that connect an item to a topic / to another item.
+TOPIC_REL_KINDS = ("related-to", "cites", "derives-from")
+
+# Filesystem roots that may hold note markdown bodies, in search order.
+NOTE_SEARCH_ROOTS = (
+    "~/.local/share/ken/notes",
+    "~/research-notes",
+    "/home/claude/research-notes",
+)
+
+
+# --------------------------------------------------------------------------- #
+# kendb access
+# --------------------------------------------------------------------------- #
+
+def default_db_path():
+    data_home = os.environ.get(
+        "XDG_DATA_HOME", os.path.expanduser("~/.local/share")
+    )
+    return os.path.join(data_home, "ken", "ken.db")
+
+
+def resolve_ken(arg_ken):
+    """Resolve the ken binary path from arg, env, or default."""
+    cand = arg_ken or os.environ.get("KEN") or DEFAULT_KEN
+    if os.path.isfile(cand) and os.access(cand, os.X_OK):
+        return cand
+    found = shutil.which("ken")
+    if found:
+        return found
+    return cand  # let the later subprocess call surface the error
+
+
+def ken_list(ken, db_path, kind):
+    """Run `ken list --kind <kind>` and return the parsed JSON array."""
+    cmd = [ken, "-D", db_path, "list", "--kind", kind]
+    try:
+        out = subprocess.run(
+            cmd, capture_output=True, text=True, check=True
+        ).stdout
+    except (subprocess.CalledProcessError, FileNotFoundError) as exc:
+        stderr = getattr(exc, "stderr", "") or str(exc)
+        raise SystemExit(
+            f"error: `ken list --kind {kind}` failed: {stderr.strip()}"
+        )
+    out = out.strip()
+    if not out:
+        return []
+    try:
+        data = json.loads(out)
+    except json.JSONDecodeError as exc:
+        raise SystemExit(f"error: could not parse ken output for {kind}: {exc}")
+    return data if isinstance(data, list) else []
+
+
+def db_connect(db_path):
+    if not os.path.exists(db_path):
+        raise SystemExit(
+            f"error: kendb not found at {db_path} (run `ken init` first)"
+        )
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
+def fetch_publication(conn, pub_id):
+    return conn.execute(
+        "SELECT id, key, kind, title FROM publications WHERE id = ?",
+        (pub_id,),
+    ).fetchone()
+
+
+def fetch_publication_by_key(conn, key):
+    """Resolve a key to a publication, never to an ongo-web marker.
+
+    An ongo-web marker's own key equals the slug/key of its target, so a
+    naive `WHERE key = ?` would match the marker itself. Exclude the marker
+    kind and prefer a deterministic order.
+    """
+    return conn.execute(
+        "SELECT id, key, kind, title FROM publications "
+        "WHERE key = ? AND kind != 'ongo-web' "
+        "ORDER BY created_at, id LIMIT 1",
+        (key,),
+    ).fetchone()
+
+
+def fetch_notes_body(conn, pub_id):
+    """Concatenate all note bodies for a publication (deterministic order)."""
+    rows = conn.execute(
+        "SELECT body FROM notes WHERE publication = ? ORDER BY id",
+        (pub_id,),
+    ).fetchall()
+    bodies = [r["body"] for r in rows if r["body"]]
+    return "\n\n".join(bodies).strip()
+
+
+def fetch_related(conn, pub_id):
+    """Return (kind, other_pub_id) for every relationship touching pub_id."""
+    out = []
+    for row in conn.execute(
+        "SELECT kind, subject, object FROM relationships "
+        "WHERE subject = ? OR object = ?",
+        (pub_id, pub_id),
+    ):
+        other = row["object"] if row["subject"] == pub_id else row["subject"]
+        out.append((row["kind"], other))
+    return out
+
+
+# --------------------------------------------------------------------------- #
+# source body resolution
+# --------------------------------------------------------------------------- #
+
+def find_slug_file(slug):
+    """Locate a markdown file for a slug-style key under known note roots."""
+    if not slug or "/" in slug or slug.endswith(".pdf"):
+        return None
+    for root in NOTE_SEARCH_ROOTS:
+        root = os.path.expanduser(root)
+        if not os.path.isdir(root):
+            continue
+        direct = os.path.join(root, slug + ".md")
+        if os.path.isfile(direct):
+            return direct
+        # recursive match: any *<slug>*.md (deterministic: sorted, first hit)
+        matches = sorted(
+            glob.glob(os.path.join(root, "**", "*.md"), recursive=True)
+        )
+        for m in matches:
+            stem = os.path.splitext(os.path.basename(m))[0]
+            if stem == slug:
+                return m
+    return None
+
+
+def resolve_source(conn, pub, log):
+    """Resolve a publication to its renderable source.
+
+    Returns a dict: {kind: 'markdown'|'pdf'|'text', body|path}
+    or None if it cannot be resolved (caller emits a warning + skips).
+    """
+    key = pub["key"]
+    title = pub["title"] or ""
+
+    # 1. key is a filesystem path.
+    if key and key.startswith("/"):
+        if os.path.isfile(key):
+            ext = os.path.splitext(key)[1].lower()
+            if ext == ".pdf":
+                return {"kind": "pdf", "path": key}
+            if ext in (".md", ".markdown", ".tex", ".txt"):
+                with open(key, "r", encoding="utf-8", errors="replace") as fh:
+                    return {"kind": "markdown", "body": fh.read(),
+                            "is_tex": ext == ".tex"}
+        # fall through to other strategies if the path is missing
+
+    # 2. key is a slug -> filesystem markdown.
+    if key:
+        slug_file = find_slug_file(key)
+        if slug_file:
+            with open(slug_file, "r", encoding="utf-8",
+                      errors="replace") as fh:
+                return {"kind": "markdown", "body": fh.read()}
+
+    # 3. kendb notes-table body.
+    body = fetch_notes_body(conn, pub["id"])
+    if body:
+        return {"kind": "markdown", "body": body}
+
+    # 4. fall back to the title as the body.
+    if title.strip():
+        log.append(
+            f"  note: {pub['id']} resolved to title-only body "
+            f"(no file or notes body found)"
+        )
+        return {"kind": "markdown", "body": "# " + title.strip()}
+
+    return None
+
+
+# --------------------------------------------------------------------------- #
+# minimal Markdown -> HTML
+# --------------------------------------------------------------------------- #
+
+_INLINE_CODE = re.compile(r"`([^`]+)`")
+_BOLD = re.compile(r"\*\*([^*]+)\*\*")
+_ITALIC = re.compile(r"(?<!\*)\*(?!\*)([^*]+)\*(?!\*)")
+_LINK = re.compile(r"\[([^\]]+)\]\(([^)\s]+)\)")
+_HTML_TAG_LINE = re.compile(r"^\s*<(/?)([a-zA-Z][\w-]*)")
+
+
+def _render_inline(text, link_resolver):
+    """Render inline markdown within an already-escaped run is wrong; we
+    escape here and re-insert safe markup."""
+    # Protect inline code spans first (no further processing inside).
+    placeholders = {}
+
+    def _stash(m):
+        token = f"\x00CODE{len(placeholders)}\x00"
+        placeholders[token] = "<code>" + html.escape(m.group(1)) + "</code>"
+        return token
+
+    text = _INLINE_CODE.sub(_stash, text)
+    text = html.escape(text)
+
+    def _link_sub(m):
+        label, target = m.group(1), m.group(2)
+        href, is_plain = link_resolver(target)
+        if is_plain:
+            # Unpublished target: degrade to plain text, no link, no leak.
+            return html.escape(label)
+        return f'<a href="{html.escape(href)}">{html.escape(label)}</a>'
+
+    # _LINK runs against escaped text; brackets/parens are not escaped by
+    # html.escape, so the pattern still matches.
+    text = _LINK.sub(_link_sub, text)
+    text = _BOLD.sub(r"<strong>\1</strong>", text)
+    text = _ITALIC.sub(r"<em>\1</em>", text)
+    for token, value in placeholders.items():
+        text = text.replace(token, value)
+    return text
+
+
+def markdown_to_html(md, link_resolver):
+    """Convert a useful subset of Markdown to HTML.
+
+    Supports: ATX headings, paragraphs, ordered/unordered lists, fenced and
+    indented code blocks, blockquotes, horizontal rules, inline code,
+    bold/italic, links, and pass-through of raw HTML blocks.
+    """
+    lines = md.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+    out = []
+    i = 0
+    n = len(lines)
+
+    def close_list(stack):
+        while stack:
+            out.append("</%s>" % stack.pop())
+
+    list_stack = []
+
+    while i < n:
+        line = lines[i]
+        stripped = line.strip()
+
+        # Fenced code block.
+        if stripped.startswith("```") or stripped.startswith("~~~"):
+            close_list(list_stack)
+            fence = stripped[:3]
+            i += 1
+            buf = []
+            while i < n and lines[i].strip()[:3] != fence:
+                buf.append(lines[i])
+                i += 1
+            i += 1  # consume closing fence
+            out.append(
+                "<pre><code>" + html.escape("\n".join(buf)) + "</code></pre>"
+            )
+            continue
+
+        # Pass-through raw HTML block.
+        if _HTML_TAG_LINE.match(line):
+            close_list(list_stack)
+            buf = [line]
+            i += 1
+            while i < n and lines[i].strip() != "":
+                buf.append(lines[i])
+                i += 1
+            out.append("\n".join(buf))
+            continue
+
+        # Blank line.
+        if stripped == "":
+            close_list(list_stack)
+            i += 1
+            continue
+
+        # Horizontal rule.
+        if re.fullmatch(r"(-{3,}|\*{3,}|_{3,})", stripped):
+            close_list(list_stack)
+            out.append("<hr>")
+            i += 1
+            continue
+
+        # Heading.
+        m = re.match(r"^(#{1,6})\s+(.*?)\s*#*\s*$", line)
+        if m:
+            close_list(list_stack)
+            level = len(m.group(1))
+            out.append(
+                "<h%d>%s</h%d>"
+                % (level, _render_inline(m.group(2), link_resolver), level)
+            )
+            i += 1
+            continue
+
+        # Blockquote.
+        if stripped.startswith(">"):
+            close_list(list_stack)
+            buf = []
+            while i < n and lines[i].strip().startswith(">"):
+                buf.append(re.sub(r"^\s*>\s?", "", lines[i]))
+                i += 1
+            out.append(
+                "<blockquote>%s</blockquote>"
+                % _render_inline(" ".join(buf), link_resolver)
+            )
+            continue
+
+        # Lists (unordered / ordered). Single level is enough for the corpus.
+        m_ul = re.match(r"^(\s*)([-*+])\s+(.*)$", line)
+        m_ol = re.match(r"^(\s*)(\d+)[.)]\s+(.*)$", line)
+        if m_ul or m_ol:
+            tag = "ul" if m_ul else "ol"
+            if not list_stack or list_stack[-1] != tag:
+                close_list(list_stack)
+                out.append("<%s>" % tag)
+                list_stack.append(tag)
+            content = (m_ul or m_ol).group(3)
+            out.append(
+                "<li>%s</li>" % _render_inline(content, link_resolver)
+            )
+            i += 1
+            continue
+
+        # Indented code block (4 spaces / tab).
+        if line.startswith("    ") or line.startswith("\t"):
+            close_list(list_stack)
+            buf = []
+            while i < n and (
+                lines[i].startswith("    ")
+                or lines[i].startswith("\t")
+                or lines[i].strip() == ""
+            ):
+                if lines[i].strip() == "" and not (
+                    i + 1 < n
+                    and (
+                        lines[i + 1].startswith("    ")
+                        or lines[i + 1].startswith("\t")
+                    )
+                ):
+                    break
+                buf.append(re.sub(r"^(\t|    )", "", lines[i]))
+                i += 1
+            out.append(
+                "<pre><code>"
+                + html.escape("\n".join(buf).rstrip())
+                + "</code></pre>"
+            )
+            continue
+
+        # Paragraph (gather consecutive plain lines).
+        close_list(list_stack)
+        buf = [line]
+        i += 1
+        while i < n:
+            nxt = lines[i]
+            ns = nxt.strip()
+            if ns == "" or ns.startswith(("#", ">", "```", "~~~")):
+                break
+            if re.match(r"^\s*([-*+]|\d+[.)])\s+", nxt):
+                break
+            if _HTML_TAG_LINE.match(nxt):
+                break
+            buf.append(nxt)
+            i += 1
+        out.append(
+            "<p>%s</p>" % _render_inline(" ".join(buf), link_resolver)
+        )
+
+    close_list(list_stack)
+    return "\n".join(out)
+
+
+# --------------------------------------------------------------------------- #
+# site assembly
+# --------------------------------------------------------------------------- #
+
+CSS = """\
+:root{--fg:#1b1b1f;--bg:#fbfbfa;--muted:#6b6b75;--accent:#3a5a99;
+--border:#e2e2e0;--code-bg:#f0f0ee}
+*{box-sizing:border-box}
+body{margin:0;font:16px/1.65 -apple-system,BlinkMacSystemFont,"Segoe UI",
+Roboto,Helvetica,Arial,sans-serif;color:var(--fg);background:var(--bg)}
+.wrap{max-width:760px;margin:0 auto;padding:2.5rem 1.25rem 5rem}
+header.site{border-bottom:1px solid var(--border);margin-bottom:2rem;
+padding-bottom:1rem}
+header.site a{color:var(--fg);text-decoration:none;font-weight:600;
+font-size:1.15rem}
+header.site .tag{color:var(--muted);font-size:.85rem;margin-top:.25rem}
+h1,h2,h3,h4{line-height:1.25;margin:1.8rem 0 .8rem}
+h1{font-size:1.9rem}h2{font-size:1.45rem}h3{font-size:1.2rem}
+a{color:var(--accent)}
+p{margin:.9rem 0}
+ul,ol{margin:.9rem 0;padding-left:1.5rem}li{margin:.3rem 0}
+code{background:var(--code-bg);padding:.12em .35em;border-radius:3px;
+font-size:.9em}
+pre{background:var(--code-bg);padding:1rem;border-radius:6px;overflow:auto}
+pre code{background:none;padding:0}
+blockquote{margin:1rem 0;padding:.3rem 1rem;border-left:3px solid
+var(--border);color:var(--muted)}
+hr{border:none;border-top:1px solid var(--border);margin:2rem 0}
+.topic{margin:2rem 0}
+.topic h2{border-bottom:1px solid var(--border);padding-bottom:.3rem}
+.topic ul{list-style:none;padding-left:0}
+.topic li{margin:.5rem 0}
+.crumb{font-size:.85rem;color:var(--muted);margin-bottom:1.5rem}
+.crumb a{color:var(--muted)}
+footer.site{margin-top:4rem;padding-top:1rem;border-top:1px solid
+var(--border);color:var(--muted);font-size:.82rem}
+.embed{width:100%;height:80vh;border:1px solid var(--border);border-radius:6px}
+"""
+
+
+def slugify(text, fallback):
+    s = re.sub(r"[^a-z0-9]+", "-", (text or "").lower()).strip("-")
+    return s[:80] if s else fallback
+
+
+def page_shell(site_title, body, crumb_html, depth):
+    up = "../" * depth
+    return f"""<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>{html.escape(site_title)}</title>
+<style>{CSS}</style>
+</head>
+<body>
+<div class="wrap">
+<header class="site">
+<a href="{up}index.html">{html.escape(site_title)}</a>
+<div class="tag">Published research notes</div>
+</header>
+{crumb_html}
+{body}
+<footer class="site">
+Generated by ongo-site from the kendb publish set (kind: ongo-web).
+Static, self-contained, no external assets.
+</footer>
+</div>
+</body>
+</html>
+"""
+
+
+def build(args):
+    ken = resolve_ken(args.ken)
+    db_path = args.db or default_db_path()
+    out_dir = os.path.abspath(args.out)
+
+    log = []
+    log.append(f"ken: {ken}")
+    log.append(f"kendb: {db_path}")
+    log.append(f"out: {out_dir}")
+
+    markers = ken_list(ken, db_path, "ongo-web")
+    log.append(f"ongo-web markers: {len(markers)}")
+
+    conn = db_connect(db_path)
+
+    # topic id -> {title, key}
+    topics = {}
+    for t in ken_list(ken, db_path, "topic"):
+        topics[t["id"]] = t
+
+    # Resolve every marker to a published item.
+    items = {}  # source_pub_id -> item dict
+    for m in markers:
+        ref = m.get("key") or ""
+        nav_title = (m.get("title") or "").strip()
+        if not ref:
+            log.append(
+                f"  WARNING: ongo-web {m['id']} has no key — skipping"
+            )
+            continue
+
+        pub = fetch_publication(conn, ref)
+        if pub is None:
+            pub = fetch_publication_by_key(conn, ref)
+        if pub is None:
+            log.append(
+                f"  WARNING: ongo-web key {ref!r} resolves to no "
+                f"publication — skipping"
+            )
+            continue
+        if pub["kind"] == "ongo-web":
+            log.append(
+                f"  WARNING: ongo-web {m['id']} points at another "
+                f"ongo-web marker — skipping"
+            )
+            continue
+
+        source = resolve_source(conn, pub, log)
+        if source is None:
+            log.append(
+                f"  WARNING: could not resolve a body for "
+                f"{pub['id']} (key={pub['key']!r}) — skipping"
+            )
+            continue
+
+        display = nav_title or (pub["title"] or "Untitled")[:120]
+        section_override = fetch_notes_body(conn, m["id"]).strip() or None
+        slug = slugify(display, pub["id"][:8])
+        items[pub["id"]] = {
+            "pub_id": pub["id"],
+            "display": display,
+            "slug": slug,
+            "source": source,
+            "section_override": section_override,
+            "page_path": f"items/{slug}.html",
+        }
+
+    if not items:
+        log.append("  no resolvable published items — site will be empty")
+
+    # Group items under topics via the relationship graph.
+    # topic_id -> [item, ...] ; plus an 'Unfiled' bucket.
+    grouped = {}
+    UNFILED = "__unfiled__"
+    for item in items.values():
+        if item["section_override"]:
+            grouped.setdefault(("override", item["section_override"]), []) \
+                .append(item)
+            continue
+        placed = False
+        for rkind, other in fetch_related(conn, item["pub_id"]):
+            if other in topics:
+                grouped.setdefault(("topic", other), []).append(item)
+                placed = True
+        if not placed:
+            grouped.setdefault(("unfiled", UNFILED), []).append(item)
+
+    # Build a published-set lookup for cross-link resolution.
+    published_ids = set(items.keys())
+
+    def make_link_resolver(depth):
+        up = "../" * depth
+
+        def resolver(target):
+            # Cross-link to another published note by id/key -> its page.
+            tpub = fetch_publication(conn, target)
+            if tpub is None:
+                tpub = fetch_publication_by_key(conn, target)
+            if tpub is not None and tpub["id"] in published_ids:
+                page = items[tpub["id"]]["page_path"]
+                return (up + page, False)
+            if tpub is not None:
+                # Resolves to a real but UNPUBLISHED note: do not leak.
+                return ("", True)
+            # External link (http/https/mailto) -> keep as-is.
+            if re.match(r"^[a-z][a-z0-9+.-]*://", target) or \
+                    target.startswith("mailto:"):
+                return (target, False)
+            # Relative/anchor links -> keep.
+            if target.startswith("#") or target.startswith("/"):
+                return (target, False)
+            return (target, False)
+
+        return resolver
+
+    # --- write output --------------------------------------------------- #
+    if os.path.isdir(out_dir):
+        shutil.rmtree(out_dir)
+    os.makedirs(os.path.join(out_dir, "items"), exist_ok=True)
+
+    # Per-item pages.
+    for item in sorted(items.values(), key=lambda x: x["slug"]):
+        src = item["source"]
+        crumb = (
+            '<div class="crumb"><a href="../index.html">Index</a> / '
+            + html.escape(item["display"])
+            + "</div>"
+        )
+        if src["kind"] == "pdf":
+            pdf_name = os.path.basename(src["path"])
+            assets_dir = os.path.join(out_dir, "items", "assets")
+            os.makedirs(assets_dir, exist_ok=True)
+            shutil.copyfile(src["path"], os.path.join(assets_dir, pdf_name))
+            body = (
+                f"<h1>{html.escape(item['display'])}</h1>"
+                f'<p><a href="assets/{html.escape(pdf_name)}">'
+                f"Download PDF</a></p>"
+                f'<iframe class="embed" src="assets/'
+                f'{html.escape(pdf_name)}"></iframe>'
+            )
+        else:
+            resolver = make_link_resolver(depth=1)
+            html_body = markdown_to_html(src["body"], resolver)
+            # Ensure a visible title even if body lacks an H1.
+            if "<h1>" not in html_body:
+                html_body = (
+                    f"<h1>{html.escape(item['display'])}</h1>\n" + html_body
+                )
+            body = html_body
+        page = page_shell(
+            args.site_title, body, crumb, depth=1
+        )
+        with open(
+            os.path.join(out_dir, item["page_path"]),
+            "w",
+            encoding="utf-8",
+        ) as fh:
+            fh.write(page)
+
+    # Index page: topics -> items, deterministic ordering.
+    sections = []  # (heading, sort_key, [items])
+    for (kind, gid), gitems in grouped.items():
+        if kind == "topic":
+            heading = topics[gid]["title"] or topics[gid].get("key") or gid
+        elif kind == "override":
+            heading = gid
+        else:
+            heading = "Other notes"
+        sections.append((heading, gitems))
+
+    sections.sort(key=lambda s: s[0].lower())
+
+    index_body = ["<h1>" + html.escape(args.site_title) + "</h1>"]
+    if not items:
+        index_body.append(
+            "<p>No published items yet. Mark content with "
+            "<code>ken add ongo-web -k &lt;note-id&gt; "
+            "--title &quot;…&quot;</code>.</p>"
+        )
+    for heading, gitems in sections:
+        index_body.append('<div class="topic">')
+        index_body.append("<h2>" + html.escape(heading) + "</h2>")
+        index_body.append("<ul>")
+        for item in sorted(gitems, key=lambda x: x["display"].lower()):
+            index_body.append(
+                '<li><a href="%s">%s</a></li>'
+                % (
+                    html.escape(item["page_path"]),
+                    html.escape(item["display"]),
+                )
+            )
+        index_body.append("</ul>")
+        index_body.append("</div>")
+
+    with open(
+        os.path.join(out_dir, "index.html"), "w", encoding="utf-8"
+    ) as fh:
+        fh.write(
+            page_shell(
+                args.site_title, "\n".join(index_body), "", depth=0
+            )
+        )
+
+    conn.close()
+
+    # Build log (also written into the site dir for auditability).
+    log.append(f"published items: {len(items)}")
+    log.append(f"sections: {len(sections)}")
+    log_text = "\n".join(log) + "\n"
+    with open(
+        os.path.join(out_dir, "build.log"), "w", encoding="utf-8"
+    ) as fh:
+        fh.write(log_text)
+    sys.stdout.write(log_text)
+    return 0
+
+
+def main(argv=None):
+    p = argparse.ArgumentParser(
+        prog="ongo-site",
+        description="Generate a static site from the kendb ongo-web "
+        "publish set.",
+    )
+    p.add_argument(
+        "--ken",
+        default=None,
+        help="path to the ken binary (env KEN, else built-in default)",
+    )
+    p.add_argument(
+        "--db",
+        default=None,
+        help="path to ken database (default: ~/.local/share/ken/ken.db)",
+    )
+    p.add_argument(
+        "--out",
+        default="./site",
+        help="output directory (default: ./site)",
+    )
+    p.add_argument(
+        "--site-title",
+        default="Ongo Research",
+        help='site title / header (default: "Ongo Research")',
+    )
+    p.add_argument(
+        "--base-url",
+        default="",
+        help="optional base URL (informational; pages use relative links)",
+    )
+    args = p.parse_args(argv)
+    return build(args)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

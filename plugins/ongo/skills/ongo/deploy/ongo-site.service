@@ -1,0 +1,37 @@
+# systemd unit for serving the generated ongo-site directory.
+#
+# This is a TEMPLATE. Edit the paths/user below, then install:
+#
+#   sudo cp ongo-site.service /etc/systemd/system/ongo-site.service
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now ongo-site
+#
+# Recommended: keep this bound to a local port and put nginx/caddy in front
+# as a TLS-terminating reverse proxy (see deploy/README.md). The user points
+# DNS (ongo.ergodic.xyz) at the server MANUALLY; ongo never touches DNS.
+
+[Unit]
+Description=ongo-site static research site
+After=network.target
+
+[Service]
+Type=simple
+# Replace with the unprivileged user that owns the site directory.
+User=ongo
+Group=ongo
+# Absolute path to the ongo skill's bin/ongo-serve and the generated site.
+# Adjust to where the ongo plugin is installed on this host.
+ExecStart=/usr/bin/python3 /opt/ongo/skills/ongo/bin/ongo-serve \
+    --dir /opt/ongo/site --host 127.0.0.1 --port 8080
+WorkingDirectory=/opt/ongo
+Restart=on-failure
+RestartSec=5
+# Hardening (optional, recommended).
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadOnlyPaths=/opt/ongo
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
