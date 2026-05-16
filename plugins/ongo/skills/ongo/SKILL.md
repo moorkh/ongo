@@ -69,7 +69,7 @@ Write initial state to `/tmp/ongo_state.json`:
 ```json
 {
   "channel": "<CHANNEL>",
-  "last_ts": "<ts of startup message>",
+  "last_user_ts": "<ts of startup message>",
   "last_self_improve": <current unix epoch>,
   "rotation": "reference",
   "idle": false,
@@ -96,13 +96,13 @@ The tick prompt must be **self-contained** since each cron fire is a fresh conte
 > Run one ongo research agent tick.
 >
 > 1. Read state: `cat /tmp/ongo_state.json`
-> 2. Poll Slack with the robust poller: `$SKILL_DIR/bin/ongo-poll "$CHANNEL" "$LAST_TS"` — returns JSON `{total_seen, user_count, newest_ts, user_messages[]}`. Do **not** call `clacks read --after` directly (see "Polling correctly" below).
-> 3. The poller already filters out `[ongo]`/`_[ongo]` bot messages; `user_messages` are the real ones, ascending by `ts`.
-> 4. **If `user_count > 0`**: send `_[ongo] Processing..._`, process each user message in order.
+> 2. Poll Slack with the robust poller: `$SKILL_DIR/bin/ongo-poll "$CHANNEL" "$LAST_USER_TS"` — returns JSON `{total_seen, user_count, newest_user_ts, user_messages[]}`. Do **not** call `clacks read --after` directly (see "Polling correctly" below).
+> 3. The poller filters out `[ongo]`/`_[ongo]` bot messages and returns only user messages with `ts > LAST_USER_TS`, ascending by `ts`.
+> 4. **If `user_count > 0`**: send `_[ongo] Processing..._`, process **every** returned user message in ascending order (do not skip any, even if you also spawn a background agent for one).
 > 5. **If no user messages AND not idle**: run auto-expansion — pick a topic from kendb weighted by exploration directives, launch a background research subagent (rotate: reference/Sonnet → deep notes/Opus → survey/Opus). There are **no per-topic refresh fields**; a frequently-prioritized topic stays fresh purely via its directive weight.
 > 6. **If 24h since last_self_improve**: run self-improvement cycle (layers A–E per SKILL.md).
 > 7. **On `/quit`, `/stop`, `/exit`**: send `_[ongo] Shutting down._`, delete the cron job via CronDelete, and stop.
-> 8. **Always** set `last_ts = newest_ts` from the poller and write state back — unconditionally, every tick, regardless of whether user messages were found. Load-bearing: see "Polling correctly".
+> 8. **Only after every returned user message has been handled/dispatched**, set `last_user_ts = newest_user_ts` and write state back. If `user_count == 0`, leave `last_user_ts` unchanged. **Never** advance it past an unprocessed user message, and **never** advance it because the bot sent a message. Load-bearing: see "Polling correctly".
 >
 > Always prepend `[ongo]` to every Slack message. Ken binary at: $KEN. Truncate responses over 30000 chars.
 
@@ -139,23 +139,23 @@ When a tick (or a user request) implies more than one **independent** unit of wo
 
 Each tick is self-contained. It reads state from `/tmp/ongo_state.json`, executes, and writes state back.
 
-1. Read `/tmp/ongo_state.json` to recover CHANNEL, LAST_TS, rotation, idle, ken path, last_self_improve, cron_id, cron_created.
+1. Read `/tmp/ongo_state.json` to recover CHANNEL, LAST_USER_TS, rotation, idle, ken path, last_self_improve, cron_id, cron_created.
 2. **Cron renewal check**: if current time minus `cron_created` > 259200 (3 days), renew the cron job (CronDelete old, CronCreate new, update state, log to kendb as `ongo-cron-reset`).
-3. Poll: `$SKILL_DIR/bin/ongo-poll "$CHANNEL" "$LAST_TS"` — on failure, log and exit tick. Parse its JSON output.
-4. `user_messages` (already bot-filtered, ascending by `ts`) are the messages to handle.
-5. **`user_count > 0`**: send `_[ongo] Processing..._`, then for each user message in order: process it, respond via `clacks send -c "$CHANNEL" -m "[ongo] <response>"`.
+3. Poll: `$SKILL_DIR/bin/ongo-poll "$CHANNEL" "$LAST_USER_TS"` — on failure, log and exit tick. Parse its JSON output.
+4. `user_messages` (bot-filtered, `ts > LAST_USER_TS`, ascending) are the messages to handle.
+5. **`user_count > 0`**: send `_[ongo] Processing..._`, then for **every** message in ascending order: process it (or dispatch a background agent for it), respond via `clacks send -c "$CHANNEL" -m "[ongo] <response>"`. Do not skip any, even partially-handled ones.
 6. **No user messages AND not idle**: run auto-expansion (see Auto-Expansion section).
 7. **24h since last_self_improve** (or user requested): run self-improvement, update last_self_improve.
-8. Set `LAST_TS = newest_ts` from the poller output (**unconditionally**) and write updated state back to `/tmp/ongo_state.json`.
+8. Only after **all** returned user messages are handled/dispatched, set `LAST_USER_TS = newest_user_ts` and write state back. If `user_count == 0`, leave `LAST_USER_TS` unchanged.
 
 ### Polling correctly
 
-`clacks read -c $CHANNEL --after $LAST_TS` is **not** a safe primitive for the loop and must not be used directly:
+`clacks read -c $CHANNEL --after $ts` is **not** a safe primitive for the loop and must not be used directly. Two bugs were found and fixed in sequence:
 
-- It returns a bounded *oldest-first* slice (~15–20 messages) anchored at `--after`, not a stream of everything since. Once the bot's own `[ongo]` status messages exceed that slice, the slice is pure bot chatter and **real user messages further ahead in time are never returned** — the filter then truthfully reports "0 user messages" of a window that structurally cannot contain them.
-- If `LAST_TS` is only advanced when a user message is found, it freezes at session start (idle channels are all bot traffic), permanently pinning the read window to that dead slice. The loop goes silent without any error.
+- **Capped slice.** `clacks read --after` returns a bounded *oldest-first* slice (~15–20 msgs) anchored at `--after`, not a stream of everything since. Once the bot's own `[ongo]` messages exceed that slice it is pure bot chatter and real user messages further ahead are never returned — the filter then truthfully reports "0 user messages" of a window that structurally cannot contain them.
+- **Bot-contaminated cursor.** The first fix advanced the cursor to the newest message *including the bot's own sends*. A user message timestamped before one of the bot's sends but after the previous cursor was then excluded by the `> cursor` filter next poll — silently missed because the bot "spoke later." This actually happened (four user messages lost in one busy turn).
 
-`bin/ongo-poll` fixes this: it pages forward, adds a numeric-epoch `--since` self-heal window (clacks relative strings like `"2 hours ago"` silently return nothing — only numeric epoch works), filters bot messages, and reports `newest_ts` across **all** messages seen. The caller **must** persist `newest_ts` as the new `LAST_TS` every tick, unconditionally — that monotonic advance is what keeps the window riding the head of the channel. "Look for everything since the last check" is the invariant; `LAST_TS` is the high-water mark of *messages seen*, not of *messages answered*.
+**The invariant.** The gate is `LAST_USER_TS` = ts of the most recent USER message *actually processed*. It advances **only** when user messages are handled, **never** because the bot sent something, and **never** past an unprocessed user message. There is no separate bot-influenced cursor — bot/loop traffic is irrelevant to whether a user message is outstanding. `bin/ongo-poll` takes `LAST_USER_TS`, unions three independent reads (`recent` latest-N head + numeric-epoch `--since` window [clacks relative strings like `"2 hours ago"` silently return nothing — only epoch works] + `--after`), and returns user messages with `ts > LAST_USER_TS`. Process the whole batch each tick in ascending order; only then advance `LAST_USER_TS` to `newest_user_ts`. "Every user message is eventually processed exactly once" is the invariant — not "ride the head of the channel."
 
 There are deliberately **no per-topic scheduling fields** in state (e.g. no `last_<topic>_refresh`). Keeping any one topic current is the job of the directive-weighted auto-expansion in step 6, not bespoke per-topic timers — those don't generalize and put scheduling policy in state instead of in the loop.
 
@@ -276,7 +276,7 @@ Review past attempts: `${CLAUDE_SKILL_DIR}/bin/ken list --kind ongo-self-improve
 
 File issues/PRs against tools (ken, clacks, etc.) when you hit bugs or missing features. Track as `ongo-self-improvement` entries keyed by issue/PR URL. On subsequent cycles, check status via `gh issue view`/`gh pr view` and update notes. Record rejection reasons to inform future attempts.
 
-**Constraints**: Do not remove shutdown commands, remove error handling, weaken dedup (`ts > LAST_TS` filter), or modify these constraints.
+**Constraints**: Do not remove shutdown commands, remove error handling, weaken the `ts > LAST_USER_TS` user-message gate or advance it on bot traffic, bypass `bin/ongo-poll`, or modify these constraints.
 
 ## Message Format
 
