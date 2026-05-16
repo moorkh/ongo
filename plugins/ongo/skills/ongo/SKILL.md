@@ -1,5 +1,6 @@
 ---
 name: ongo
+version: 0.2.0
 description: >-
   Autonomous research agent. Polls Slack for research requests, tracks findings
   in kendb, expands research when idle, and self-improves on a 24-hour cycle.
@@ -42,30 +43,32 @@ ${CLAUDE_SKILL_DIR}/bin/ken init
 ### 3. Register custom kinds
 
 ```bash
-${CLAUDE_SKILL_DIR}/bin/ken pubkind show ongo-exploration 2>/dev/null || ${CLAUDE_SKILL_DIR}/bin/ken pubkind add ongo-exploration "A user preference that shapes ongo's research expansion strategy. The key is a short label, the title is the full instruction. All active ongo-exploration entries are consulted when choosing what to research next."
+${CLAUDE_SKILL_DIR}/bin/ken pubkind show ongo-exploration 2>/dev/null | grep -q '"name"' || ${CLAUDE_SKILL_DIR}/bin/ken pubkind add ongo-exploration "A user preference that shapes ongo's research expansion strategy. The key is a short label, the title is the full instruction. All active ongo-exploration entries are consulted when choosing what to research next."
 ```
 
 ```bash
-${CLAUDE_SKILL_DIR}/bin/ken pubkind show ongo-self-improvement 2>/dev/null || ${CLAUDE_SKILL_DIR}/bin/ken pubkind add ongo-self-improvement "A record of an ongo self-improvement attempt. The key is a timestamp-label. The title describes what was changed. Notes on the publication record the outcome."
+${CLAUDE_SKILL_DIR}/bin/ken pubkind show ongo-self-improvement 2>/dev/null | grep -q '"name"' || ${CLAUDE_SKILL_DIR}/bin/ken pubkind add ongo-self-improvement "A record of an ongo self-improvement attempt. The key is a timestamp-label. The title describes what was changed. Notes on the publication record the outcome."
 ```
 
 ```bash
-${CLAUDE_SKILL_DIR}/bin/ken pubkind show ongo-cron-reset 2>/dev/null || ${CLAUDE_SKILL_DIR}/bin/ken pubkind add ongo-cron-reset "A record of a CronCreate renewal. The key is a timestamp. The title records the old and new cron job IDs. Ongo must renew its cron job every 3 days to prevent the 7-day auto-expiry from killing the loop."
+${CLAUDE_SKILL_DIR}/bin/ken pubkind show ongo-cron-reset 2>/dev/null | grep -q '"name"' || ${CLAUDE_SKILL_DIR}/bin/ken pubkind add ongo-cron-reset "A record of a CronCreate renewal. The key is a timestamp. The title records the old and new cron job IDs. Ongo must renew its cron job every 3 days to prevent the 7-day auto-expiry from killing the loop."
 ```
 
 ```bash
-${CLAUDE_SKILL_DIR}/bin/ken pubkind show ongo-web 2>/dev/null || ${CLAUDE_SKILL_DIR}/bin/ken pubkind add ongo-web "Publish marker for the static site. The key is the target publication's id (or its key), the title is the display/nav label, and an optional notes body overrides the section/topic heading. Only items referenced by an ongo-web entry appear on the generated site (see bin/ongo-site)."
+${CLAUDE_SKILL_DIR}/bin/ken pubkind show ongo-web 2>/dev/null | grep -q '"name"' || ${CLAUDE_SKILL_DIR}/bin/ken pubkind add ongo-web "Publish marker for the static site. The key is the target publication's id (or its key), the title is the display/nav label, and an optional notes body overrides the section/topic heading. Only items referenced by an ongo-web entry appear on the generated site (see bin/ongo-site)."
 ```
 
 **Registration is not durable — every `ken add <customkind>` must be idempotent.** Startup registration above happens once, but each tick and each subagent runs in a fresh context and may operate against a kendb instance where the custom kind is not registered (this was observed in production: `ken add ongo-cron-reset` failed mid-run because the pubkind was missing from that kendb instance and had to be re-registered by hand). Therefore **never call `ken add <customkind> …` bare.** Always ensure the pubkind first, in the same step:
 
 ```bash
-# Reusable pattern — use this everywhere a custom kind is written (ongo-exploration, ongo-self-improvement, ongo-cron-reset):
-${CLAUDE_SKILL_DIR}/bin/ken pubkind show <kind> 2>/dev/null || ${CLAUDE_SKILL_DIR}/bin/ken pubkind add <kind> "<description from startup>"
+# Reusable pattern — use this everywhere a custom kind is written (ongo-exploration, ongo-self-improvement, ongo-cron-reset, ongo-web):
+${CLAUDE_SKILL_DIR}/bin/ken pubkind show <kind> 2>/dev/null | grep -q '"name"' || ${CLAUDE_SKILL_DIR}/bin/ken pubkind add <kind> "<description from startup>"
 ${CLAUDE_SKILL_DIR}/bin/ken add <kind> -k "<key>" --title "<title>"
 ```
 
 This guard is cheap (a `pubkind show` is local) and is the only thing that keeps cron-reset / self-improvement logging from silently failing on a re-initialized kendb. The standard `note`/`topic`/`arxiv`/`web` kinds are built into ken and do not need this guard.
+
+**Why `grep -q '"name"'` and not `|| `-on-exit-code:** the documented `ken pubkind show X 2>/dev/null || ken pubkind add X "…"` guard does not work on shipped ken — `ken pubkind show` for an *absent* kind exits **0** (and prints its "not found" message, depending on ken version, to stdout or stderr), so `||` never fires and the custom kind is silently never registered. A successful `pubkind show` emits JSON containing `"name"`; the not-found case emits no `"name"` on stdout. Testing stdout for `"name"` therefore detects absence reliably regardless of exit code or which stream the error uses. This is a **workaround for a ken bug fixed upstream separately**; it remains correct after a ken upgrade (a real `pubkind show` still emits `"name"`), so it is safe to keep once ken is upgraded.
 
 ### 4. Connect to Slack
 
@@ -421,7 +424,7 @@ publish with the idempotent ensure-pubkind-then-add pattern from Startup
 step 3:
 
 ```bash
-${CLAUDE_SKILL_DIR}/bin/ken pubkind show ongo-web 2>/dev/null || ${CLAUDE_SKILL_DIR}/bin/ken pubkind add ongo-web "<description from startup>"
+${CLAUDE_SKILL_DIR}/bin/ken pubkind show ongo-web 2>/dev/null | grep -q '"name"' || ${CLAUDE_SKILL_DIR}/bin/ken pubkind add ongo-web "<description from startup>"
 ${CLAUDE_SKILL_DIR}/bin/ken add ongo-web -k "<note-id>" --title "<nav title>"
 ```
 
@@ -433,6 +436,15 @@ deterministic — it **regenerates each self-improvement cycle** (see
 Self-Improvement layer A). Cross-links between published notes resolve to
 their pages; links to unpublished notes degrade to plain text so
 unpublished content is never leaked.
+
+**Regeneration is atomic.** The generator builds into a sibling temp dir
+and then swaps it into place with a single `os.replace` (same filesystem,
+true atomic rename). A request that arrives mid-regeneration always reads
+a **complete** tree — either the previous site or the new one, never a
+half-written mix — so `bin/ongo-serve` / `http.server` **needs no restart**
+across a regeneration and there is no read-during-write window. The temp
+dir is removed on any failure (no `.tmp`/`.old` is ever left behind), so a
+crashed or interrupted build leaves the previously published site intact.
 
 `${CLAUDE_SKILL_DIR}/bin/ongo-serve` serves the generated directory via
 `python3 -m http.server` (default `0.0.0.0:8080`). Hosting is
