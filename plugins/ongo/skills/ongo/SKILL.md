@@ -74,7 +74,10 @@ Write initial state to `/tmp/ongo_state.json`:
   "rotation": "reference",
   "idle": false,
   "ken": "${CLAUDE_SKILL_DIR}/bin/ken",
-  "cron_created": <current unix epoch>
+  "cron_created": <current unix epoch>,
+  "normal_cron": "<computed cron expression from --interval>",
+  "mode": "normal",
+  "fast_idle_polls": 0
 }
 ```
 
@@ -102,7 +105,8 @@ The tick prompt must be **self-contained** since each cron fire is a fresh conte
 > 5. **If no user messages AND not idle**: run auto-expansion — pick a topic from kendb weighted by exploration directives, launch a background research subagent (rotate: reference/Sonnet → deep notes/Opus → survey/Opus). There are **no per-topic refresh fields**; a frequently-prioritized topic stays fresh purely via its directive weight.
 > 6. **If 24h since last_self_improve**: run self-improvement cycle (layers A–E per SKILL.md).
 > 7. **On `/quit`, `/stop`, `/exit`**: send `_[ongo] Shutting down._`, delete the cron job via CronDelete, and stop.
-> 8. **Only after every returned user message has been handled/dispatched**, set `last_user_ts = newest_user_ts` and write state back. If `user_count == 0`, leave `last_user_ts` unchanged. **Never** advance it past an unprocessed user message, and **never** advance it because the bot sent a message. Load-bearing: see "Polling correctly".
+> 8. **Fast-mode transition** (see "Fast mode"): if `user_count > 0`, reset `fast_idle_polls=0` and enter fast mode (1-min cron) if currently normal; if `user_count == 0` and in fast mode, increment `fast_idle_polls` and exit to `normal_cron` after it reaches 5.
+> 9. **Only after every returned user message has been handled/dispatched**, set `last_user_ts = newest_user_ts` and write state back. If `user_count == 0`, leave `last_user_ts` unchanged. **Never** advance it past an unprocessed user message, and **never** advance it because the bot sent a message. Load-bearing: see "Polling correctly".
 >
 > Always prepend `[ongo]` to every Slack message. Ken binary at: $KEN. Truncate responses over 30000 chars.
 
@@ -146,7 +150,8 @@ Each tick is self-contained. It reads state from `/tmp/ongo_state.json`, execute
 5. **`user_count > 0`**: send `_[ongo] Processing..._`, then for **every** message in ascending order: process it (or dispatch a background agent for it), respond via `clacks send -c "$CHANNEL" -m "[ongo] <response>"`. Do not skip any, even partially-handled ones.
 6. **No user messages AND not idle**: run auto-expansion (see Auto-Expansion section).
 7. **24h since last_self_improve** (or user requested): run self-improvement, update last_self_improve.
-8. Only after **all** returned user messages are handled/dispatched, set `LAST_USER_TS = newest_user_ts` and write state back. If `user_count == 0`, leave `LAST_USER_TS` unchanged.
+8. **Fast-mode transition** (see "Fast mode"): `user_count > 0` → `fast_idle_polls=0`, enter fast mode if normal; `user_count == 0` and fast → `fast_idle_polls++`, exit to `normal_cron` at 5.
+9. Only after **all** returned user messages are handled/dispatched, set `LAST_USER_TS = newest_user_ts` and write state back. If `user_count == 0`, leave `LAST_USER_TS` unchanged.
 
 ### Polling correctly
 
@@ -158,6 +163,22 @@ Each tick is self-contained. It reads state from `/tmp/ongo_state.json`, execute
 **The invariant.** The gate is `LAST_USER_TS` = ts of the most recent USER message *actually processed*. It advances **only** when user messages are handled, **never** because the bot sent something, and **never** past an unprocessed user message. There is no separate bot-influenced cursor — bot/loop traffic is irrelevant to whether a user message is outstanding. `bin/ongo-poll` takes `LAST_USER_TS`, unions three independent reads (`recent` latest-N head + numeric-epoch `--since` window [clacks relative strings like `"2 hours ago"` silently return nothing — only epoch works] + `--after`), and returns user messages with `ts > LAST_USER_TS`. Process the whole batch each tick in ascending order; only then advance `LAST_USER_TS` to `newest_user_ts`. "Every user message is eventually processed exactly once" is the invariant — not "ride the head of the channel."
 
 There are deliberately **no per-topic scheduling fields** in state (e.g. no `last_<topic>_refresh`). Keeping any one topic current is the job of the directive-weighted auto-expansion in step 6, not bespoke per-topic timers — those don't generalize and put scheduling policy in state instead of in the loop.
+
+### Fast mode — responsive polling during active conversations
+
+The base cadence (`--interval`, default 30 min) is fine when idle but far too slow when the user is actively talking. **Fast mode** makes the loop poll every 1 minute while a conversation is live, then fall back automatically.
+
+State carries: `"mode"` (`"normal"` | `"fast"`, default `"normal"`), `"fast_idle_polls"` (int, default `0`), and `"normal_cron"` (the base cron expression computed at startup from `--interval`, stored so it can be restored).
+
+Cron expressions: normal = `normal_cron`; fast = `"* * * * *"` (every minute).
+
+Transition logic, evaluated every tick **after** polling and message handling, **before** the state write:
+
+- **`user_count > 0`** (the user said something): set `fast_idle_polls = 0`. If `mode == "normal"`, **enter fast mode**: `CronDelete` the current `cron_id`, `CronCreate` with `"* * * * *"` (recurring, durable) and the same tick prompt, update `cron_id`/`cron_created`, set `mode = "fast"`, log a `ongo-cron-reset` kendb entry noting the mode change.
+- **`user_count == 0` and `mode == "fast"`**: increment `fast_idle_polls`. If `fast_idle_polls >= 5`, **exit fast mode**: `CronDelete`, `CronCreate` with `normal_cron`, update `cron_id`/`cron_created`, set `mode = "normal"`, `fast_idle_polls = 0`, log `ongo-cron-reset`.
+- **`mode == "normal"` and `user_count == 0`**: nothing.
+
+Properties: entering fast mode is immediate on the first detected user message; a back-and-forth keeps resetting `fast_idle_polls` so the loop stays at 1-min cadence for the whole exchange; after 5 consecutive 1-min polls (~5 min) with silence it reverts. The cron-renewal check still applies to whichever cron is active. Fast-mode cron swaps are a normal part of operation and do not count against the 3-day renewal logic except that each swap resets `cron_created` (which is correct — it *is* a fresh cron).
 
 ### Shutdown
 
