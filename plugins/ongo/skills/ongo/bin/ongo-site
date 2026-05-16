@@ -493,14 +493,42 @@ Static, self-contained, no external assets.
 
 
 def build(args):
+    """Generate the site and publish it atomically.
+
+    Atomic publish: build into a sibling temp dir in the SAME parent
+    directory (so os.replace below stays on one filesystem — required
+    for an atomic rename; /tmp would be a different mount), then swap
+    it into place. Readers (e.g. http.server) only ever observe a
+    complete tree: either the previous site or the new one, never a
+    half-written mix. The try/finally guarantees the temp dir is
+    removed on any failure, so a crashed build never leaks it.
+    """
+    out_dir = os.path.abspath(args.out)
+    parent = os.path.dirname(out_dir) or "."
+    work_dir = os.path.join(
+        parent, f".{os.path.basename(out_dir)}.tmp-{os.getpid()}"
+    )
+    try:
+        return _build_into(args, out_dir, work_dir)
+    finally:
+        # Never leave the temp dir behind. On success os.replace already
+        # consumed work_dir (this is a no-op); on any exception it cleans
+        # the partial tree. ignore_errors so cleanup never masks the real
+        # failure being propagated.
+        if os.path.isdir(work_dir):
+            shutil.rmtree(work_dir, ignore_errors=True)
+
+
+def _build_into(args, out_dir, work_dir):
     ken = resolve_ken(args.ken)
     db_path = args.db or default_db_path()
-    out_dir = os.path.abspath(args.out)
+    old_dir = out_dir + ".old"
 
     log = []
     log.append(f"ken: {ken}")
     log.append(f"kendb: {db_path}")
     log.append(f"out: {out_dir}")
+    log.append(f"work: {work_dir}")
 
     markers = ken_list(ken, db_path, "ongo-web")
     log.append(f"ongo-web markers: {len(markers)}")
@@ -607,10 +635,12 @@ def build(args):
 
         return resolver
 
-    # --- write output --------------------------------------------------- #
-    if os.path.isdir(out_dir):
-        shutil.rmtree(out_dir)
-    os.makedirs(os.path.join(out_dir, "items"), exist_ok=True)
+    # --- write output (into the temp dir, then atomic swap) ------------- #
+    # Start from a clean temp dir (a stale one from a previously killed
+    # build with the same pid would otherwise contaminate the output).
+    if os.path.isdir(work_dir):
+        shutil.rmtree(work_dir)
+    os.makedirs(os.path.join(work_dir, "items"), exist_ok=True)
 
     # Per-item pages.
     for item in sorted(items.values(), key=lambda x: x["slug"]):
@@ -622,7 +652,7 @@ def build(args):
         )
         if src["kind"] == "pdf":
             pdf_name = os.path.basename(src["path"])
-            assets_dir = os.path.join(out_dir, "items", "assets")
+            assets_dir = os.path.join(work_dir, "items", "assets")
             os.makedirs(assets_dir, exist_ok=True)
             shutil.copyfile(src["path"], os.path.join(assets_dir, pdf_name))
             body = (
@@ -645,7 +675,7 @@ def build(args):
             args.site_title, body, crumb, depth=1
         )
         with open(
-            os.path.join(out_dir, item["page_path"]),
+            os.path.join(work_dir, item["page_path"]),
             "w",
             encoding="utf-8",
         ) as fh:
@@ -687,7 +717,7 @@ def build(args):
         index_body.append("</div>")
 
     with open(
-        os.path.join(out_dir, "index.html"), "w", encoding="utf-8"
+        os.path.join(work_dir, "index.html"), "w", encoding="utf-8"
     ) as fh:
         fh.write(
             page_shell(
@@ -702,9 +732,29 @@ def build(args):
     log.append(f"sections: {len(sections)}")
     log_text = "\n".join(log) + "\n"
     with open(
-        os.path.join(out_dir, "build.log"), "w", encoding="utf-8"
+        os.path.join(work_dir, "build.log"), "w", encoding="utf-8"
     ) as fh:
         fh.write(log_text)
+
+    # --- atomic swap ---------------------------------------------------- #
+    # The new tree in work_dir is now complete. Replace out_dir atomically
+    # so a concurrent reader (http.server) only ever sees a whole tree:
+    #   1. drop any stale <out>.old from a prior interrupted swap,
+    #   2. move the current out_dir aside to <out>.old (if it exists),
+    #   3. os.replace(work_dir -> out_dir) — atomic rename, same fs,
+    #   4. best-effort remove <out>.old.
+    # All four steps are os.replace/rmtree on sibling paths in the same
+    # parent dir, so the rename is a true atomic filesystem operation
+    # (no cross-device copy). Idempotent and deterministic: re-running
+    # produces the same out_dir and leaves no .tmp/.old behind.
+    if os.path.isdir(old_dir):
+        shutil.rmtree(old_dir)
+    if os.path.exists(out_dir):
+        os.replace(out_dir, old_dir)
+    os.replace(work_dir, out_dir)
+    if os.path.isdir(old_dir):
+        shutil.rmtree(old_dir, ignore_errors=True)
+
     sys.stdout.write(log_text)
     return 0
 

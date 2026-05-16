@@ -58,6 +58,16 @@ or finally the title. Unresolvable references are skipped with a warning in
 notes resolve to their generated pages; links to **unpublished** notes
 degrade to plain text so unpublished content is never leaked.
 
+**Regeneration is atomic.** `ongo-site` builds the new tree in a sibling
+temp directory and then swaps it into place with a single `os.replace`
+(same filesystem — a true atomic rename, not a copy). A reader that hits
+the site mid-regeneration always sees a **complete** tree (the old site or
+the new one, never a partial mix), so the running `ongo-serve` /
+`http.server` **does not need to be restarted** across regenerations and
+there is no read-during-write race. If the build fails or is interrupted,
+the temp dir is removed (no `.tmp`/`.old` is left behind) and the
+previously published site stays in place untouched.
+
 ## 3. Serve the site
 
 ```bash
