@@ -96,13 +96,13 @@ The tick prompt must be **self-contained** since each cron fire is a fresh conte
 > Run one ongo research agent tick.
 >
 > 1. Read state: `cat /tmp/ongo_state.json`
-> 2. Poll Slack: `clacks read -c "$CHANNEL" --after "$LAST_TS"`
-> 3. Filter out messages where `text` starts with `[ongo]` or `_[ongo]`.
-> 4. **If user messages exist**: send `_[ongo] Processing..._`, process each, update last_ts.
-> 5. **If no user messages AND not idle**: run auto-expansion — pick a random topic from kendb weighted by exploration directives, launch a background research subagent (rotate: reference/Sonnet → deep notes/Opus → survey/Opus).
+> 2. Poll Slack with the robust poller: `$SKILL_DIR/bin/ongo-poll "$CHANNEL" "$LAST_TS"` — returns JSON `{total_seen, user_count, newest_ts, user_messages[]}`. Do **not** call `clacks read --after` directly (see "Polling correctly" below).
+> 3. The poller already filters out `[ongo]`/`_[ongo]` bot messages; `user_messages` are the real ones, ascending by `ts`.
+> 4. **If `user_count > 0`**: send `_[ongo] Processing..._`, process each user message in order.
+> 5. **If no user messages AND not idle**: run auto-expansion — pick a topic from kendb weighted by exploration directives, launch a background research subagent (rotate: reference/Sonnet → deep notes/Opus → survey/Opus). There are **no per-topic refresh fields**; a frequently-prioritized topic stays fresh purely via its directive weight.
 > 6. **If 24h since last_self_improve**: run self-improvement cycle (layers A–E per SKILL.md).
 > 7. **On `/quit`, `/stop`, `/exit`**: send `_[ongo] Shutting down._`, delete the cron job via CronDelete, and stop.
-> 8. Write updated state back to `/tmp/ongo_state.json`.
+> 8. **Always** set `last_ts = newest_ts` from the poller and write state back — unconditionally, every tick, regardless of whether user messages were found. Load-bearing: see "Polling correctly".
 >
 > Always prepend `[ongo]` to every Slack message. Ken binary at: $KEN. Truncate responses over 30000 chars.
 
@@ -126,18 +126,38 @@ The main loop is driven by **CronCreate** — each tick fires as an independent 
 
 Do NOT preemptively shut down for context concerns — each tick is a fresh context. Only shut down on explicit user command (`/quit`, `/stop`, `/exit`).
 
+### Concurrency — parallelize independent work
+
+When a tick (or a user request) implies more than one **independent** unit of work — e.g. a user-facing deliverable plus loop/skill maintenance plus research expansion — launch a background subagent **per unit, in the same turn**, and continue immediately. Do **not** serialize independent tasks, and never let the loop's own bookkeeping (polling, state writes, repo/PR work, self-improvement layers) block or delay a user-facing deliverable.
+
+- The main loop is deliberately lean precisely so heavyweight work can be delegated and run concurrently. Underusing concurrency wastes that design and adds latency to things the user is waiting on.
+- Reserve serialization strictly for genuine **data dependencies** (B needs A's output). Absent that, fan out.
+- All spawns remain subject to the memory-tier gate (see Auto-Expansion). Within the allowed tier, prefer launching the user deliverable first, then the maintenance work, both in the background.
+- A user deliverable must never wait on unrelated maintenance. If both are due in one tick, the deliverable subagent is launched first and does not block on the rest.
+
 ### Tick (cron-fired)
 
 Each tick is self-contained. It reads state from `/tmp/ongo_state.json`, executes, and writes state back.
 
 1. Read `/tmp/ongo_state.json` to recover CHANNEL, LAST_TS, rotation, idle, ken path, last_self_improve, cron_id, cron_created.
 2. **Cron renewal check**: if current time minus `cron_created` > 259200 (3 days), renew the cron job (CronDelete old, CronCreate new, update state, log to kendb as `ongo-cron-reset`).
-3. `clacks read -c "$CHANNEL" --after "$LAST_TS"` — on failure, log and exit tick.
-4. Filter out messages where `text` starts with `[ongo]` or `_[ongo]`. Sort remainder by `ts` ascending.
-5. **New messages**: send `_[ongo] Processing..._`, then for each: update LAST_TS to its `ts`, process it, respond via `clacks send -c "$CHANNEL" -m "[ongo] <response>"`.
-6. **No new messages AND not idle**: run auto-expansion (see Auto-Expansion section).
+3. Poll: `$SKILL_DIR/bin/ongo-poll "$CHANNEL" "$LAST_TS"` — on failure, log and exit tick. Parse its JSON output.
+4. `user_messages` (already bot-filtered, ascending by `ts`) are the messages to handle.
+5. **`user_count > 0`**: send `_[ongo] Processing..._`, then for each user message in order: process it, respond via `clacks send -c "$CHANNEL" -m "[ongo] <response>"`.
+6. **No user messages AND not idle**: run auto-expansion (see Auto-Expansion section).
 7. **24h since last_self_improve** (or user requested): run self-improvement, update last_self_improve.
-8. Write updated state back to `/tmp/ongo_state.json`.
+8. Set `LAST_TS = newest_ts` from the poller output (**unconditionally**) and write updated state back to `/tmp/ongo_state.json`.
+
+### Polling correctly
+
+`clacks read -c $CHANNEL --after $LAST_TS` is **not** a safe primitive for the loop and must not be used directly:
+
+- It returns a bounded *oldest-first* slice (~15–20 messages) anchored at `--after`, not a stream of everything since. Once the bot's own `[ongo]` status messages exceed that slice, the slice is pure bot chatter and **real user messages further ahead in time are never returned** — the filter then truthfully reports "0 user messages" of a window that structurally cannot contain them.
+- If `LAST_TS` is only advanced when a user message is found, it freezes at session start (idle channels are all bot traffic), permanently pinning the read window to that dead slice. The loop goes silent without any error.
+
+`bin/ongo-poll` fixes this: it pages forward, adds a numeric-epoch `--since` self-heal window (clacks relative strings like `"2 hours ago"` silently return nothing — only numeric epoch works), filters bot messages, and reports `newest_ts` across **all** messages seen. The caller **must** persist `newest_ts` as the new `LAST_TS` every tick, unconditionally — that monotonic advance is what keeps the window riding the head of the channel. "Look for everything since the last check" is the invariant; `LAST_TS` is the high-water mark of *messages seen*, not of *messages answered*.
+
+There are deliberately **no per-topic scheduling fields** in state (e.g. no `last_<topic>_refresh`). Keeping any one topic current is the job of the directive-weighted auto-expansion in step 6, not bespoke per-topic timers — those don't generalize and put scheduling policy in state instead of in the loop.
 
 ### Shutdown
 

@@ -1,0 +1,110 @@
+#!/usr/bin/env python3
+"""ongo-poll — robust Slack poll for the ongo tick loop.
+
+Usage:
+    ongo-poll <CHANNEL> <LAST_TS>
+
+Prints a JSON object to stdout:
+    {
+      "total_seen":   <int>,    # all messages seen this poll (bot + user)
+      "user_count":   <int>,    # non-[ongo] messages
+      "newest_ts":    "<str>",  # newest ts across ALL messages, or LAST_TS
+      "user_messages": [ {"ts": "...", "text": "..."}, ... ]  # ascending
+    }
+
+WHY THIS EXISTS
+---------------
+The naive tick did `clacks read -c $CHANNEL --after $LAST_TS` and only
+advanced LAST_TS when a *user* message was found. Two failure modes compound:
+
+  1. Stale anchor. If the only traffic is the bot's own `[ongo]` status
+     messages, LAST_TS never advances and stays frozen at session start.
+
+  2. History cap near the anchor. `clacks read --after <old ts>` does not
+     stream everything after the anchor; it returns a bounded oldest-first
+     slice (~15-20 msgs) sitting at the anchor. Once >~20 bot messages pile
+     up after session start, that slice is entirely bot chatter and real
+     user messages — which are further ahead in time — are never returned.
+     The filter then truthfully reports "0 user messages" of a window that
+     structurally cannot contain them. The loop goes deaf.
+
+FIX
+---
+  * Advance the anchor to the NEWEST message ts seen every tick (bot OR
+    user), and persist it. The read window then rides the head of the
+    channel instead of freezing behind the bot's own backlog.
+  * Add a numeric-epoch `--since` safety net so a stale anchor self-heals.
+    (clacks' relative-time strings like "2 hours ago" silently return
+    nothing; only numeric epoch works — do not use relative strings.)
+  * Page through results so a single capped response is not mistaken for
+    "no more messages".
+
+The caller must write `newest_ts` back to state as the new LAST_TS every
+tick, unconditionally — that is the load-bearing part of the fix.
+"""
+import json
+import subprocess
+import sys
+import time
+
+SAFETY_WINDOW_SECONDS = 7200  # 2h self-heal window for a stale anchor
+PAGE = 200
+
+
+def _read(channel, args):
+    try:
+        out = subprocess.run(
+            ["clacks", "read", "-c", channel] + args,
+            capture_output=True, text=True, timeout=60,
+        ).stdout
+        return json.loads(out).get("messages", [])
+    except Exception:
+        return []
+
+
+def poll(channel, last_ts):
+    seen = {}
+
+    # Primary: page forward from the anchor.
+    cursor = last_ts
+    while True:
+        page = _read(channel, ["--after", cursor, "-l", str(PAGE)])
+        fresh = [m for m in page if m.get("ts", "0") > cursor]
+        if not fresh:
+            break
+        for m in fresh:
+            seen[m["ts"]] = m
+        cursor = max(m["ts"] for m in fresh)
+        if len(page) < PAGE:
+            break
+
+    # Safety net: a recent time window via numeric epoch (relative strings
+    # like "2 hours ago" are unreliable in clacks and return nothing).
+    since_epoch = str(int(time.time()) - SAFETY_WINDOW_SECONDS)
+    for m in _read(channel, ["--since", since_epoch, "-l", str(PAGE)]):
+        if m.get("ts", "0") > last_ts:
+            seen[m["ts"]] = m
+
+    allm = sorted(seen.values(), key=lambda m: m.get("ts", "0"))
+
+    def is_bot(m):
+        return m.get("text", "").lstrip().startswith(("[ongo]", "_[ongo]"))
+
+    users = [m for m in allm if not is_bot(m)]
+    newest = max((m["ts"] for m in allm), default=last_ts)
+
+    return {
+        "total_seen": len(allm),
+        "user_count": len(users),
+        "newest_ts": newest,
+        "user_messages": [
+            {"ts": m["ts"], "text": m.get("text", "")} for m in users
+        ],
+    }
+
+
+if __name__ == "__main__":
+    if len(sys.argv) != 3:
+        sys.stderr.write("usage: ongo-poll <CHANNEL> <LAST_TS>\n")
+        sys.exit(2)
+    print(json.dumps(poll(sys.argv[1], sys.argv[2])))
