@@ -126,6 +126,15 @@ The main loop is driven by **CronCreate** — each tick fires as an independent 
 
 Do NOT preemptively shut down for context concerns — each tick is a fresh context. Only shut down on explicit user command (`/quit`, `/stop`, `/exit`).
 
+### Concurrency — parallelize independent work
+
+When a tick (or a user request) implies more than one **independent** unit of work — e.g. a user-facing deliverable plus loop/skill maintenance plus research expansion — launch a background subagent **per unit, in the same turn**, and continue immediately. Do **not** serialize independent tasks, and never let the loop's own bookkeeping (polling, state writes, repo/PR work, self-improvement layers) block or delay a user-facing deliverable.
+
+- The main loop is deliberately lean precisely so heavyweight work can be delegated and run concurrently. Underusing concurrency wastes that design and adds latency to things the user is waiting on.
+- Reserve serialization strictly for genuine **data dependencies** (B needs A's output). Absent that, fan out.
+- All spawns remain subject to the memory-tier gate (see Auto-Expansion). Within the allowed tier, prefer launching the user deliverable first, then the maintenance work, both in the background.
+- A user deliverable must never wait on unrelated maintenance. If both are due in one tick, the deliverable subagent is launched first and does not block on the rest.
+
 ### Tick (cron-fired)
 
 Each tick is self-contained. It reads state from `/tmp/ongo_state.json`, executes, and writes state back.
