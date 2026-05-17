@@ -1,6 +1,6 @@
 ---
 name: ongo
-version: 0.2.0
+version: 0.3.0
 description: >-
   Autonomous research agent. Polls Slack for research requests, tracks findings
   in kendb, expands research when idle, and self-improves on a 24-hour cycle.
@@ -431,9 +431,14 @@ ${CLAUDE_SKILL_DIR}/bin/ken add ongo-web -k "<note-id>" --title "<nav title>"
 their kendb topic graph, plus per-item HTML pages with an embedded CSS
 theme and no external assets. It is stdlib-only, idempotent, and
 deterministic — it **regenerates each self-improvement cycle** (see
-Self-Improvement layer A). Cross-links between published notes resolve to
-their pages; links to unpublished notes degrade to plain text so
-unpublished content is never leaked.
+Self-Improvement layer A). Source bodies resolve in order: a filesystem
+`.md`/`.pdf`/`.tex` named by the publication key, a slug match under the
+note roots, the kendb note body read via `ken show --json` (zomglings/ken#8,
+**ken ≥ v3** — analogous to the ken#7 dependency in Startup step 3; on older
+ken `ken show` is absent and resolution degrades gracefully to a legacy
+direct notes-table read), or finally the title. Cross-links between
+published notes resolve to their pages; links to unpublished notes degrade
+to plain text so unpublished content is never leaked.
 
 **Regeneration is atomic.** The generator builds into a sibling temp dir
 and then swaps it into place with a single `os.replace` (same filesystem,
