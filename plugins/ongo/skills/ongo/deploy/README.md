@@ -71,35 +71,44 @@ previously published site stays in place untouched.
 ## 3. Serve the site
 
 ```bash
-bin/ongo-serve                                   # ./site on 0.0.0.0:2080
-bin/ongo-serve --dir /opt/ongo/site --port 2080
+bin/ongo-serve                                   # ./site on 0.0.0.0:80
+bin/ongo-serve --dir /opt/ongo/site --port 80
 ```
 
-For production, run it under systemd and behind a reverse proxy:
+For production, run it under systemd:
 
 - Install the templated unit `deploy/ongo-site.service` (edit paths/user
-  first). It binds `ongo-serve` to `127.0.0.1:2080`.
-- Put nginx or caddy in front for TLS termination.
+  first). It binds `ongo-serve` directly to `0.0.0.0:80`.
+- **Port 80 is privileged (<1024).** The unit grants the unprivileged
+  `ongo` user `CAP_NET_BIND_SERVICE` (via `AmbientCapabilities`, which
+  works even with `NoNewPrivileges=true` because systemd applies ambient
+  capabilities before exec) — so the service binds :80 **without running
+  as full root**. No reverse proxy is required for plain HTTP.
 
-nginx reverse-proxy example:
+A reverse proxy is now **optional** — only needed if you also want HTTPS
+on :443. If so, terminate TLS in nginx/caddy and proxy to the ongo-serve
+backend (point it at a high local port instead of :80 in that case).
+
+nginx TLS example (optional — ongo-serve on a local port, proxy adds 443):
 
 ```nginx
 server {
-    listen 80;
+    listen 443 ssl;
     server_name ongo.ergodic.xyz;
+    # ssl_certificate / ssl_certificate_key ...
     location / {
-        proxy_pass http://127.0.0.1:2080;
+        proxy_pass http://127.0.0.1:80;
         proxy_set_header Host $host;
         proxy_set_header X-Forwarded-For $remote_addr;
     }
 }
 ```
 
-Caddy equivalent (`Caddyfile`):
+Caddy equivalent (`Caddyfile`, auto-TLS):
 
 ```
 ongo.ergodic.xyz {
-    reverse_proxy 127.0.0.1:2080
+    reverse_proxy 127.0.0.1:80
 }
 ```
 

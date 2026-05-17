@@ -445,7 +445,7 @@ dir is removed on any failure (no `.tmp`/`.old` is ever left behind), so a
 crashed or interrupted build leaves the previously published site intact.
 
 `${CLAUDE_SKILL_DIR}/bin/ongo-serve` serves the generated directory via
-`python3 -m http.server` (default `0.0.0.0:2080`). Hosting is
+`python3 -m http.server` (default `0.0.0.0:80`). Hosting is
 **self-served on the user's own server** (see `deploy/README.md` and the
 `deploy/ongo-site.service` systemd template). The user points DNS
 (`ongo.ergodic.xyz`) at their server **manually** — the skill must never
