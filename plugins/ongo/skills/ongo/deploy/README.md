@@ -53,9 +53,11 @@ The generator is stdlib-only, idempotent, and rewrites the output directory
 cleanly — it is safe to run every self-improvement cycle. Source bodies are
 resolved from (in order) a filesystem `.md`/`.pdf`/`.tex` named by the
 publication key, a slug match under the note roots, the kendb note body via
-`ken show --json` (zomglings/ken#8, **ken ≥ v3**; on older ken `ken show` is
-absent and resolution degrades gracefully to a legacy direct notes-table
-read), or finally the title. Unresolvable references are skipped with a
+`ken show --json` (zomglings/ken#8, **ken ≥ v3** — the supported CLI read
+path for ken's first-class `notes` table; on older ken `ken show` is absent
+and resolution degrades gracefully to a compatibility fallback that reads
+the same first-class `notes` data via direct SQL against ken's internal
+schema from outside the tool), or finally the title. Unresolvable references are skipped with a
 warning in `site/build.log` (the build never crashes). Cross-links between published
 notes resolve to their generated pages; links to **unpublished** notes
 degrade to plain text so unpublished content is never leaked.

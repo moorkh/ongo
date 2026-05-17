@@ -14,8 +14,11 @@ The generator:
      from (in order): a filesystem .md/.pdf/.tex named by the publication key,
      a slug -> ~/.local/share/ken/notes/<slug>.md or research-notes/**.md
      match, the kendb note body via `ken show --json` (zomglings/ken#8,
-     ken >= v3; degrades gracefully to a legacy direct notes-table read on
-     older ken), or finally the publication title.
+     ken >= v3 — the supported CLI read path for ken's first-class `notes`
+     table; on older ken without `ken show` it degrades gracefully to a
+     compatibility fallback that reads the same first-class `notes` data
+     by issuing direct SQL against ken's internal schema from outside the
+     tool), or finally the publication title.
   3. Groups published items under their kendb topic(s) (topic publications +
      `related-to` / `cites` / `derives-from` relationships) into a clean index.
   4. Emits a deterministic, self-contained static directory (default ./site/)
@@ -234,11 +237,14 @@ def resolve_source(conn, pub, log, ken, db_path):
 
     Resolution order: a filesystem .md/.pdf/.tex named by the publication
     key, a slug match under the note roots, the kendb note body read via
-    `ken show --json` (zomglings/ken#8, ken >= v3), and finally the title.
+    `ken show --json` (zomglings/ken#8, ken >= v3 — the supported CLI read
+    path for ken's first-class `notes` table), and finally the title.
     The `ken show` step degrades gracefully on older ken (the command is
     absent / errors): `ken_show_body` returns None and the chain falls
-    through to the legacy direct-notes read, so unresolvable refs still
-    only warn in build.log and the build never crashes.
+    through to the direct-DB-access fallback (direct SQL against ken's
+    internal `notes` schema from outside the tool, for ken < v3), so
+    unresolvable refs still only warn in build.log and the build never
+    crashes.
     """
     key = pub["key"]
     title = pub["title"] or ""
@@ -272,10 +278,14 @@ def resolve_source(conn, pub, log, ken, db_path):
     if show_body and show_body.strip():
         return {"kind": "markdown", "body": show_body}
 
-    # 3b. Legacy fallback: direct `notes`-table read. Kept ONLY so older
-    #     deployed ken (without `ken show`, i.e. zomglings/ken#8 not yet
-    #     released) does not regress — `ken_show_body` returns None there
-    #     and we fall back to reading the bodies straight from the kendb.
+    # 3b. Compatibility fallback: ongo-site issues its own direct SQL
+    #     against ken's internal `notes` schema from outside the tool. The
+    #     `notes` table is a first-class ken feature (the canonical store
+    #     for publication bodies); what is downgraded here is *external
+    #     direct-database access* to it, not the table itself. Kept ONLY so
+    #     older deployed ken (without `ken show`, i.e. zomglings/ken#8 not
+    #     yet released) does not regress — `ken_show_body` returns None
+    #     there and we read the same first-class bodies via direct SQL.
     #     Once every deployed ken is >= v3 this branch becomes dead code
     #     and can be removed.
     if show_body is None:

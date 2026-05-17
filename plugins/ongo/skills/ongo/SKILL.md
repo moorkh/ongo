@@ -434,9 +434,11 @@ deterministic — it **regenerates each self-improvement cycle** (see
 Self-Improvement layer A). Source bodies resolve in order: a filesystem
 `.md`/`.pdf`/`.tex` named by the publication key, a slug match under the
 note roots, the kendb note body read via `ken show --json` (zomglings/ken#8,
-**ken ≥ v3** — analogous to the ken#7 dependency in Startup step 3; on older
-ken `ken show` is absent and resolution degrades gracefully to a legacy
-direct notes-table read), or finally the title. Cross-links between
+**ken ≥ v3** — analogous to the ken#7 dependency in Startup step 3; the
+supported CLI read path for ken's first-class `notes` table. On older ken
+`ken show` is absent and resolution degrades gracefully to a compatibility
+fallback that reads the same first-class `notes` data via direct SQL against
+ken's internal schema from outside the tool), or finally the title. Cross-links between
 published notes resolve to their pages; links to unpublished notes degrade
 to plain text so unpublished content is never leaked.
 
