@@ -10,7 +10,7 @@ DNS or deploys anything.
 Usage:
     ongo-serve [--dir DIR] [--host HOST] [--port PORT]
 
-Defaults: --dir ./site  --host 0.0.0.0  --port 8080
+Defaults: --dir ./site  --host 0.0.0.0  --port 2080
 """
 
 import argparse
@@ -25,7 +25,7 @@ def main(argv=None):
     )
     p.add_argument("--dir", default="./site", help="site directory")
     p.add_argument("--host", default="0.0.0.0", help="bind host")
-    p.add_argument("--port", type=int, default=8080, help="bind port")
+    p.add_argument("--port", type=int, default=2080, help="bind port")
     args = p.parse_args(argv)
 
     site_dir = os.path.abspath(args.dir)

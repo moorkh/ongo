@@ -71,14 +71,14 @@ previously published site stays in place untouched.
 ## 3. Serve the site
 
 ```bash
-bin/ongo-serve                                   # ./site on 0.0.0.0:8080
-bin/ongo-serve --dir /opt/ongo/site --port 8080
+bin/ongo-serve                                   # ./site on 0.0.0.0:2080
+bin/ongo-serve --dir /opt/ongo/site --port 2080
 ```
 
 For production, run it under systemd and behind a reverse proxy:
 
 - Install the templated unit `deploy/ongo-site.service` (edit paths/user
-  first). It binds `ongo-serve` to `127.0.0.1:8080`.
+  first). It binds `ongo-serve` to `127.0.0.1:2080`.
 - Put nginx or caddy in front for TLS termination.
 
 nginx reverse-proxy example:
@@ -88,7 +88,7 @@ server {
     listen 80;
     server_name ongo.ergodic.xyz;
     location / {
-        proxy_pass http://127.0.0.1:8080;
+        proxy_pass http://127.0.0.1:2080;
         proxy_set_header Host $host;
         proxy_set_header X-Forwarded-For $remote_addr;
     }
@@ -99,7 +99,7 @@ Caddy equivalent (`Caddyfile`):
 
 ```
 ongo.ergodic.xyz {
-    reverse_proxy 127.0.0.1:8080
+    reverse_proxy 127.0.0.1:2080
 }
 ```
 

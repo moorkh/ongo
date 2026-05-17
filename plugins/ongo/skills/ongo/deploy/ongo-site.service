@@ -22,7 +22,7 @@ Group=ongo
 # Absolute path to the ongo skill's bin/ongo-serve and the generated site.
 # Adjust to where the ongo plugin is installed on this host.
 ExecStart=/usr/bin/python3 /opt/ongo/skills/ongo/bin/ongo-serve \
-    --dir /opt/ongo/site --host 127.0.0.1 --port 8080
+    --dir /opt/ongo/site --host 127.0.0.1 --port 2080
 WorkingDirectory=/opt/ongo
 Restart=on-failure
 RestartSec=5
