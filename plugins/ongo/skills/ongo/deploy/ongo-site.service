@@ -1,0 +1,43 @@
+# systemd unit for serving the generated ongo-site directory.
+#
+# This is a TEMPLATE. Edit the paths/user below, then install:
+#
+#   sudo cp ongo-site.service /etc/systemd/system/ongo-site.service
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now ongo-site
+#
+# Serves directly on :80. Port 80 is privileged (<1024), so this unit grants
+# the unprivileged 'ongo' user CAP_NET_BIND_SERVICE (works with
+# NoNewPrivileges=true because systemd applies ambient caps before exec) --
+# no full root needed. A TLS-terminating reverse proxy is now OPTIONAL and
+# only needed if you also want HTTPS on :443 (see deploy/README.md). The user
+# points DNS (ongo.ergodic.xyz) at the server MANUALLY; ongo never touches DNS.
+
+[Unit]
+Description=ongo-site static research site
+After=network.target
+
+[Service]
+Type=simple
+# Replace with the unprivileged user that owns the site directory.
+User=ongo
+Group=ongo
+# Absolute path to the ongo skill's bin/ongo-serve and the generated site.
+# Adjust to where the ongo plugin is installed on this host.
+ExecStart=/usr/bin/python3 /opt/ongo/skills/ongo/bin/ongo-serve \
+    --dir /opt/ongo/site --host 0.0.0.0 --port 80
+WorkingDirectory=/opt/ongo
+Restart=on-failure
+RestartSec=5
+# Hardening (optional, recommended).
+NoNewPrivileges=true
+# Allow binding the privileged port 80 as an unprivileged user.
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+ProtectSystem=strict
+ProtectHome=true
+ReadOnlyPaths=/opt/ongo
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,65 @@
+name: Version bump check
+
+on:
+  pull_request:
+    branches: [main]
+
+jobs:
+  check-version-bump:
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+
+    - name: Check if version bump is required
+      shell: sh
+      run: |
+        # List of files changed by this PR relative to main.
+        changed_files=$(git diff --name-only origin/main...HEAD)
+
+        # Docs-only iff every changed file is .github/*, docs/*, or a
+        # top-level *.md (no slash in the path, ends in .md).
+        docs_only=true
+        for file in $changed_files; do
+          case "$file" in
+            .github/*|docs/*) ;;
+            *)
+              if echo "$file" | grep -qE '^[^/]+\.md$'; then
+                continue
+              fi
+              docs_only=false
+              break
+              ;;
+          esac
+        done
+
+        if [ "$docs_only" = "true" ]; then
+          echo "Docs-only change, skipping version bump check."
+          exit 0
+        fi
+
+        # Compare the SKILL.md frontmatter `version:` on main vs this PR.
+        # The field may not exist yet on main (this PR may be the one
+        # introducing it): treat a missing main version as empty so any
+        # PR that adds the field counts as a bump.
+        skill=plugins/ongo/skills/ongo/SKILL.md
+        main_version=$(git show origin/main:$skill 2>/dev/null \
+          | sed -n 's/^version: *//p' | head -1)
+        pr_version=$(sed -n 's/^version: *//p' "$skill" | head -1)
+
+        echo "main version: '$main_version'"
+        echo "PR version:   '$pr_version'"
+
+        if [ -z "$pr_version" ]; then
+          echo "::error::No 'version:' field found in $skill frontmatter. Add one and bump it for non-docs changes."
+          exit 1
+        fi
+
+        if [ "$main_version" = "$pr_version" ]; then
+          echo "::error::Version in $skill was not bumped. Please bump the 'version:' frontmatter field for non-docs changes."
+          exit 1
+        fi
+
+        echo "Version bumped from '$main_version' to '$pr_version'."
