@@ -1,0 +1,21 @@
+# Oneshot: regenerate the ongo-site directory from kendb.
+# TEMPLATE — edit User/paths, then install with ongo-site-regen.timer:
+#   sudo cp ongo-site-regen.service ongo-site-regen.timer /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now ongo-site-regen.timer
+# Atomic-swap publish: the running ongo-site.service keeps serving; no restart.
+
+[Unit]
+Description=Regenerate ongo-site from kendb (oneshot)
+After=network.target
+
+[Service]
+Type=oneshot
+# Replace with the user that owns the site directory.
+User=ongo
+Group=ongo
+# Adjust to where the ongo plugin is installed on this host.
+WorkingDirectory=/opt/ongo/skills/ongo
+ExecStart=/usr/bin/python3 /opt/ongo/skills/ongo/bin/ongo-site
+TimeoutStartSec=600
+Nice=10

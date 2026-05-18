@@ -134,3 +134,7 @@ To go live, the user:
 
 That is the entire deployment boundary: ongo generates and can self-serve;
 the user owns DNS and the server.
+
+## Auto-regeneration (optional)
+
+`ongo-site-regen.service` + `ongo-site-regen.timer` regenerate the site every 15 min so new kendb `ongo-web` markers and topic/relationship edges publish automatically. Install both unit files (see the service file header), then `systemctl enable --now ongo-site-regen.timer`. The atomic-swap publish means `ongo-site.service` needs no restart.
