@@ -459,18 +459,38 @@ def vendor_katex(work_dir, log):
 # it walks for our build-emitted placeholder spans and calls katex.render.
 KATEX_RUNTIME_JS = """\
 (function(){
-  if(typeof katex==="undefined")return;
-  var nodes=document.querySelectorAll("span.ongo-math,div.ongo-math");
-  for(var i=0;i<nodes.length;i++){
-    var el=nodes[i];
-    var tex=el.getAttribute("data-tex")||"";
-    var display=el.getAttribute("data-display")==="1";
-    try{
-      katex.render(tex,el,{displayMode:display,throwOnError:false});
-    }catch(e){
-      el.textContent=(display?"$$":"$")+tex+(display?"$$":"$");
+  // NOTE: an inline <script> ignores the `defer` attribute, so this must
+  // not run at parse time (KaTeX, a deferred external script, isn't loaded
+  // yet -> spans would be left blank). Run on DOMContentLoaded (by which
+  // point the deferred katex.min.js has executed); also re-run on load,
+  // and if KaTeX is still unavailable, fall back to the raw TeX source so
+  // math is never invisible.
+  function render(){
+    var nodes=document.querySelectorAll("span.ongo-math,div.ongo-math");
+    var hasK=(typeof katex!=="undefined");
+    for(var i=0;i<nodes.length;i++){
+      var el=nodes[i];
+      if(el.getAttribute("data-done")==="1")continue;
+      var tex=el.getAttribute("data-tex")||"";
+      var display=el.getAttribute("data-display")==="1";
+      if(hasK){
+        try{
+          katex.render(tex,el,{displayMode:display,throwOnError:false});
+        }catch(e){
+          el.textContent=(display?"$$":"$")+tex+(display?"$$":"$");
+        }
+        el.setAttribute("data-done","1");
+      }else{
+        el.textContent=(display?"$$":"$")+tex+(display?"$$":"$");
+      }
     }
   }
+  if(document.readyState==="loading"){
+    document.addEventListener("DOMContentLoaded",render);
+  }else{
+    render();
+  }
+  window.addEventListener("load",render);
 })();
 """
 
