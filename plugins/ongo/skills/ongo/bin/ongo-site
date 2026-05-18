@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""ongo-site — Generate a self-contained static site from a kendb publish set.
+r"""ongo-site — Generate a self-contained static site from a kendb publish set.
 
 Nothing appears on the site unless an `ongo-web` publication references it.
 An `ongo-web` entry is the *publish marker*:
@@ -20,12 +20,20 @@ The generator:
      by issuing direct SQL against ken's internal schema from outside the
      tool), or finally the publication title.
   3. Groups published items under their kendb topic(s) (topic publications +
-     `related-to` / `cites` / `derives-from` relationships) into a clean index.
-  4. Emits a deterministic, self-contained static directory (default ./site/)
-     with an embedded CSS theme and no external assets.
+     `related-to` / `cites` / `derives-from` relationships) into a clean
+     topic-sectioned index with a top "Contents" nav (in-page anchor links
+     per topic section); items with no topic go under "Other / Ungrouped".
+  4. Renders each article with a per-article table of contents built from
+     its Markdown headings (anchor ids + links), auto-links bare http/https
+     URLs (external links get target=_blank rel=noopener), and renders
+     `$...$` / `$$...$$` / `\(...\)` / `\[...\]` math via KaTeX vendored
+     LOCALLY into site/assets/katex/ (build may fetch once; runtime never).
+  5. Emits a deterministic, self-contained static directory (default ./site/)
+     with an embedded CSS theme and no external runtime assets.
 
 Stdlib only. Safe to run every self-improvement cycle: it rewrites the output
-directory cleanly and produces deterministic output.
+directory cleanly and produces deterministic output. KaTeX vendoring degrades
+gracefully (raw math, logged to build.log) and never crashes the build.
 
 Usage:
     ongo-site [--ken PATH] [--db PATH] [--out DIR] [--site-title TITLE]
@@ -45,9 +53,28 @@ import shutil
 import sqlite3
 import subprocess
 import sys
+import tarfile
+import tempfile
+import urllib.request
 
 
 DEFAULT_KEN = "/home/claude/.claude/plugins/cache/ongo/ongo/0.1.0/skills/ongo/bin/ken"
+
+# KaTeX is vendored LOCALLY into site/assets/katex/ so the published site
+# fetches no external assets at runtime. The build may fetch the tarball
+# once (into a work dir) if no local copy is available; the runtime site
+# never does. Pinned version + sha keeps the build deterministic.
+KATEX_VERSION = "0.16.11"
+KATEX_TARBALL_URL = (
+    "https://registry.npmjs.org/katex/-/katex-%s.tgz" % KATEX_VERSION
+)
+# Local cache dirs probed before any network fetch (build-time only).
+KATEX_LOCAL_CANDIDATES = (
+    "~/.cache/ongo/katex",
+    "~/.local/share/ongo/katex",
+    "/usr/local/share/katex",
+    "/usr/share/katex",
+)
 
 # Relationship kinds that connect an item to a topic / to another item.
 TOPIC_REL_KINDS = ("related-to", "cites", "derives-from")
@@ -305,6 +332,204 @@ def resolve_source(conn, pub, log, ken, db_path):
 
 
 # --------------------------------------------------------------------------- #
+# KaTeX vendoring (build-time only; runtime is fully self-contained)
+# --------------------------------------------------------------------------- #
+
+def _katex_dir_is_complete(path):
+    """A vendored KaTeX dir is usable iff it has the css, js and a fonts dir."""
+    return (
+        os.path.isfile(os.path.join(path, "katex.min.css"))
+        and os.path.isfile(os.path.join(path, "katex.min.js"))
+        and os.path.isdir(os.path.join(path, "fonts"))
+    )
+
+
+def _find_local_katex():
+    """Return a path to an already-available KaTeX dist dir, or None.
+
+    Probed before any network fetch so the build prefers a local copy and
+    only downloads when nothing is cached. Never raises.
+    """
+    for cand in KATEX_LOCAL_CANDIDATES:
+        cand = os.path.expanduser(cand)
+        if _katex_dir_is_complete(cand):
+            return cand
+        dist = os.path.join(cand, "dist")
+        if _katex_dir_is_complete(dist):
+            return dist
+    return None
+
+
+def _download_katex_into(work_dir, log):
+    """Fetch + extract the pinned KaTeX tarball into work_dir/_katex/dist.
+
+    Build-time only. Returns the dist path on success or None on any
+    failure (logged); the caller then degrades gracefully (raw math).
+    """
+    extract_root = os.path.join(work_dir, "_katex")
+    try:
+        os.makedirs(extract_root, exist_ok=True)
+        tgz_path = os.path.join(extract_root, "katex.tgz")
+        with urllib.request.urlopen(KATEX_TARBALL_URL, timeout=30) as resp:
+            data = resp.read()
+        with open(tgz_path, "wb") as fh:
+            fh.write(data)
+        with tarfile.open(tgz_path, "r:gz") as tf:
+            members = [
+                mi
+                for mi in tf.getmembers()
+                if mi.name.startswith("package/dist/")
+                and (mi.isfile() or mi.isdir())
+                and ".." not in mi.name.split("/")
+            ]
+            for mi in members:
+                # Strip the leading "package/" so files land in dist/.
+                mi_name = mi.name[len("package/"):]
+                target = os.path.join(extract_root, mi_name)
+                if mi.isdir():
+                    os.makedirs(target, exist_ok=True)
+                    continue
+                os.makedirs(os.path.dirname(target), exist_ok=True)
+                src = tf.extractfile(mi)
+                if src is None:
+                    continue
+                with open(target, "wb") as out:
+                    shutil.copyfileobj(src, out)
+        dist = os.path.join(extract_root, "dist")
+        if _katex_dir_is_complete(dist):
+            log.append(
+                f"katex: downloaded {KATEX_VERSION} from npm (build-time)"
+            )
+            return dist
+        log.append("katex: download incomplete — degrading to raw math")
+        return None
+    except Exception as exc:  # noqa: BLE001 — never crash the build
+        log.append(f"katex: download failed ({exc}) — degrading to raw math")
+        return None
+
+
+def vendor_katex(work_dir, log):
+    """Copy a usable KaTeX dist into work_dir/assets/katex/.
+
+    Order: a local cached copy first; otherwise a one-time build-time
+    download. Returns True if KaTeX assets were vendored (math should be
+    rendered), False to degrade gracefully (raw `$...$` left in place,
+    reason logged — the build never crashes on KaTeX problems).
+    """
+    src = _find_local_katex()
+    if src:
+        log.append(f"katex: using local copy at {src}")
+    else:
+        src = _download_katex_into(work_dir, log)
+    if not src:
+        return False
+    dest = os.path.join(work_dir, "assets", "katex")
+    try:
+        os.makedirs(os.path.dirname(dest), exist_ok=True)
+        # Copy only the three things the site needs (css, js, fonts/) so
+        # the output is minimal and deterministic.
+        os.makedirs(dest, exist_ok=True)
+        shutil.copyfile(
+            os.path.join(src, "katex.min.css"),
+            os.path.join(dest, "katex.min.css"),
+        )
+        shutil.copyfile(
+            os.path.join(src, "katex.min.js"),
+            os.path.join(dest, "katex.min.js"),
+        )
+        fonts_src = os.path.join(src, "fonts")
+        fonts_dest = os.path.join(dest, "fonts")
+        if os.path.isdir(fonts_dest):
+            shutil.rmtree(fonts_dest)
+        # Deterministic copy: sorted file list.
+        os.makedirs(fonts_dest, exist_ok=True)
+        for name in sorted(os.listdir(fonts_src)):
+            sp = os.path.join(fonts_src, name)
+            if os.path.isfile(sp):
+                shutil.copyfile(sp, os.path.join(fonts_dest, name))
+        log.append("katex: vendored css+js+fonts into assets/katex/")
+        return True
+    except Exception as exc:  # noqa: BLE001 — never crash the build
+        log.append(f"katex: vendoring failed ({exc}) — degrading to raw math")
+        return False
+
+
+# Client-side renderer (deterministic, no contrib auto-render dependency):
+# it walks for our build-emitted placeholder spans and calls katex.render.
+KATEX_RUNTIME_JS = """\
+(function(){
+  if(typeof katex==="undefined")return;
+  var nodes=document.querySelectorAll("span.ongo-math,div.ongo-math");
+  for(var i=0;i<nodes.length;i++){
+    var el=nodes[i];
+    var tex=el.getAttribute("data-tex")||"";
+    var display=el.getAttribute("data-display")==="1";
+    try{
+      katex.render(tex,el,{displayMode:display,throwOnError:false});
+    }catch(e){
+      el.textContent=(display?"$$":"$")+tex+(display?"$$":"$");
+    }
+  }
+})();
+"""
+
+
+# --------------------------------------------------------------------------- #
+# math extraction ($...$, $$...$$, \(...\), \[...\])
+# --------------------------------------------------------------------------- #
+
+def extract_math(md):
+    """Pull math spans out of raw Markdown before any HTML escaping.
+
+    Replaces each occurrence with an opaque placeholder token so the
+    Markdown renderer never mangles TeX, then the placeholders are swapped
+    for KaTeX-target spans after rendering. Returns (text, mapping) where
+    mapping[token] = (tex, is_display).
+
+    Display: $$...$$ and \\[...\\].  Inline: $...$ and \\(...\\).
+    Fenced/indented code is left alone because extraction runs on the raw
+    source and code spans rarely contain `$…$`; KaTeX is also told not to
+    throw, so a stray match degrades to literal text rather than breaking.
+    """
+    mapping = {}
+
+    def _store(tex, is_display):
+        token = "\x00MATH%d\x00" % len(mapping)
+        mapping[token] = (tex.strip(), is_display)
+        return token
+
+    # Order matters: display delimiters before inline so $$ is not eaten
+    # as two empty $ … $.
+    patterns = [
+        (re.compile(r"\$\$(.+?)\$\$", re.DOTALL), True),
+        (re.compile(r"\\\[(.+?)\\\]", re.DOTALL), True),
+        (re.compile(r"\\\((.+?)\\\)", re.DOTALL), False),
+        # Inline $...$: not $$, no newline inside, not an escaped \$.
+        (re.compile(r"(?<!\\)\$(?!\$)([^\n$]+?)(?<!\\)\$(?!\$)"), False),
+    ]
+    for rx, is_display in patterns:
+        md = rx.sub(lambda m: _store(m.group(1), is_display), md)
+    return md, mapping
+
+
+def reinsert_math(html_text, mapping):
+    """Swap math placeholders for KaTeX-target spans in rendered HTML."""
+    for token, (tex, is_display) in mapping.items():
+        tag = "div" if is_display else "span"
+        span = (
+            '<%s class="ongo-math" data-display="%s" data-tex="%s"></%s>'
+            % (
+                tag,
+                "1" if is_display else "0",
+                html.escape(tex, quote=True),
+                tag,
+            )
+        )
+        html_text = html_text.replace(token, span)
+    return html_text
+
+
+# --------------------------------------------------------------------------- #
 # minimal Markdown -> HTML
 # --------------------------------------------------------------------------- #
 
@@ -313,6 +538,25 @@ _BOLD = re.compile(r"\*\*([^*]+)\*\*")
 _ITALIC = re.compile(r"(?<!\*)\*(?!\*)([^*]+)\*(?!\*)")
 _LINK = re.compile(r"\[([^\]]+)\]\(([^)\s]+)\)")
 _HTML_TAG_LINE = re.compile(r"^\s*<(/?)([a-zA-Z][\w-]*)")
+# Bare http/https URL not already inside a Markdown link target. Trailing
+# sentence punctuation is trimmed so "see https://x.org." links cleanly.
+_BARE_URL = re.compile(r"(?<![\"'(\]=])\bhttps?://[^\s<>\)\]]+")
+_URL_TRAILING = ".,;:!?’')\""
+
+
+def _is_external(href):
+    return bool(re.match(r"^[a-z][a-z0-9+.-]*://", href)) and not (
+        href.startswith("/")
+    )
+
+
+def _anchor(href, label, external):
+    extra = ' target="_blank" rel="noopener"' if external else ""
+    return '<a href="%s"%s>%s</a>' % (
+        html.escape(href, quote=True),
+        extra,
+        label,
+    )
 
 
 def _render_inline(text, link_resolver):
@@ -335,11 +579,34 @@ def _render_inline(text, link_resolver):
         if is_plain:
             # Unpublished target: degrade to plain text, no link, no leak.
             return html.escape(label)
-        return f'<a href="{html.escape(href)}">{html.escape(label)}</a>'
+        return _anchor(href, html.escape(label), _is_external(href))
 
     # _LINK runs against escaped text; brackets/parens are not escaped by
-    # html.escape, so the pattern still matches.
-    text = _LINK.sub(_link_sub, text)
+    # html.escape, so the pattern still matches. Stash each Markdown link
+    # as a placeholder so the bare-URL pass below cannot re-link the URL
+    # already inside it.
+    def _link_stash(m):
+        token = f"\x00LINK{len(placeholders)}\x00"
+        placeholders[token] = _link_sub(m)
+        return token
+
+    text = _LINK.sub(_link_stash, text)
+
+    # Auto-link bare http/https URLs into clickable anchors. External by
+    # definition (scheme present) -> target=_blank rel=noopener.
+    def _bare_sub(m):
+        raw = m.group(0)
+        trail = ""
+        while raw and raw[-1] in _URL_TRAILING:
+            trail = raw[-1] + trail
+            raw = raw[:-1]
+        if not raw:
+            return m.group(0)
+        token = f"\x00LINK{len(placeholders)}\x00"
+        placeholders[token] = _anchor(raw, html.escape(raw), True)
+        return token + trail
+
+    text = _BARE_URL.sub(_bare_sub, text)
     text = _BOLD.sub(r"<strong>\1</strong>", text)
     text = _ITALIC.sub(r"<em>\1</em>", text)
     for token, value in placeholders.items():
@@ -347,17 +614,32 @@ def _render_inline(text, link_resolver):
     return text
 
 
-def markdown_to_html(md, link_resolver):
+def markdown_to_html(md, link_resolver, collect_toc=False):
     """Convert a useful subset of Markdown to HTML.
 
     Supports: ATX headings, paragraphs, ordered/unordered lists, fenced and
     indented code blocks, blockquotes, horizontal rules, inline code,
     bold/italic, links, and pass-through of raw HTML blocks.
+
+    When collect_toc is True, returns (html, toc) where toc is a list of
+    (level, anchor_id, text) for every heading (h1-h6), and each emitted
+    heading carries a unique id="" so a per-article table of contents can
+    link to it. Otherwise returns just the html string.
     """
     lines = md.replace("\r\n", "\n").replace("\r", "\n").split("\n")
     out = []
+    toc = []
+    seen_ids = {}
     i = 0
     n = len(lines)
+
+    def _heading_id(text):
+        base = slugify(re.sub(r"<[^>]+>", "", text), "section") or "section"
+        if base in seen_ids:
+            seen_ids[base] += 1
+            return "%s-%d" % (base, seen_ids[base])
+        seen_ids[base] = 0
+        return base
 
     def close_list(stack):
         while stack:
@@ -413,10 +695,14 @@ def markdown_to_html(md, link_resolver):
         if m:
             close_list(list_stack)
             level = len(m.group(1))
+            inner = _render_inline(m.group(2), link_resolver)
+            hid = _heading_id(m.group(2))
             out.append(
-                "<h%d>%s</h%d>"
-                % (level, _render_inline(m.group(2), link_resolver), level)
+                '<h%d id="%s">%s'
+                '<a class="anchor" href="#%s" aria-hidden="true">#</a>'
+                "</h%d>" % (level, hid, inner, hid, level)
             )
+            toc.append((level, hid, re.sub(r"<[^>]+>", "", inner).strip()))
             i += 1
             continue
 
@@ -495,7 +781,10 @@ def markdown_to_html(md, link_resolver):
         )
 
     close_list(list_stack)
-    return "\n".join(out)
+    rendered = "\n".join(out)
+    if collect_toc:
+        return rendered, toc
+    return rendered
 
 
 # --------------------------------------------------------------------------- #
@@ -526,12 +815,32 @@ pre code{background:none;padding:0}
 blockquote{margin:1rem 0;padding:.3rem 1rem;border-left:3px solid
 var(--border);color:var(--muted)}
 hr{border:none;border-top:1px solid var(--border);margin:2rem 0}
-.topic{margin:2rem 0}
-.topic h2{border-bottom:1px solid var(--border);padding-bottom:.3rem}
+.topic{margin:2.5rem 0}
+.topic h2{border-bottom:2px solid var(--accent);padding-bottom:.3rem;
+scroll-margin-top:1rem}
+.topic .count{color:var(--muted);font-size:.8rem;font-weight:400}
 .topic ul{list-style:none;padding-left:0}
 .topic li{margin:.5rem 0}
 .crumb{font-size:.85rem;color:var(--muted);margin-bottom:1.5rem}
 .crumb a{color:var(--muted)}
+nav.toc{background:var(--code-bg);border:1px solid var(--border);
+border-radius:6px;padding:1rem 1.25rem;margin:1.5rem 0}
+nav.toc .toc-title{font-weight:600;font-size:.95rem;margin-bottom:.5rem;
+color:var(--fg)}
+nav.toc ul{list-style:none;margin:.3rem 0;padding-left:0}
+nav.toc ol{list-style:none;margin:.3rem 0;padding-left:0}
+nav.toc li{margin:.3rem 0;font-size:.92rem}
+nav.toc a{text-decoration:none}
+nav.toc a:hover{text-decoration:underline}
+nav.toc .lvl-2{padding-left:1rem}nav.toc .lvl-3{padding-left:2rem}
+nav.toc .lvl-4{padding-left:3rem}nav.toc .lvl-5{padding-left:4rem}
+nav.toc .lvl-6{padding-left:5rem}
+h1,h2,h3,h4,h5,h6{scroll-margin-top:1rem}
+.anchor{color:var(--border);text-decoration:none;margin-left:.4rem;
+font-weight:400;opacity:0;font-size:.8em}
+h1:hover .anchor,h2:hover .anchor,h3:hover .anchor,h4:hover .anchor,
+h5:hover .anchor,h6:hover .anchor{opacity:1}
+div.ongo-math{overflow-x:auto;margin:1rem 0}
 footer.site{margin-top:4rem;padding-top:1rem;border-top:1px solid
 var(--border);color:var(--muted);font-size:.82rem}
 .embed{width:100%;height:80vh;border:1px solid var(--border);border-radius:6px}
@@ -543,8 +852,39 @@ def slugify(text, fallback):
     return s[:80] if s else fallback
 
 
-def page_shell(site_title, body, crumb_html, depth):
+def render_toc(toc, title="Contents"):
+    """Render a heading list (level, anchor_id, text) as an in-page nav.
+
+    Used both for the per-article TOC (built from Markdown headings) and,
+    with synthetic entries, for the index "Contents" topic nav. Returns
+    "" for an empty / single-heading list (a TOC of one is just noise).
+    """
+    if len(toc) < 2:
+        return ""
+    parts = ['<nav class="toc">',
+             '<div class="toc-title">%s</div>' % html.escape(title), "<ul>"]
+    for level, anchor_id, text in toc:
+        parts.append(
+            '<li class="lvl-%d"><a href="#%s">%s</a></li>'
+            % (level, html.escape(anchor_id, quote=True), html.escape(text))
+        )
+    parts.append("</ul></nav>")
+    return "\n".join(parts)
+
+
+def page_shell(site_title, body, crumb_html, depth, with_katex=False):
     up = "../" * depth
+    katex_head = ""
+    katex_tail = ""
+    if with_katex:
+        katex_head = (
+            '<link rel="stylesheet" href="%sassets/katex/katex.min.css">'
+            % up
+        )
+        katex_tail = (
+            '<script defer src="%sassets/katex/katex.min.js"></script>\n'
+            '<script defer>%s</script>' % (up, KATEX_RUNTIME_JS)
+        )
     return f"""<!doctype html>
 <html lang="en">
 <head>
@@ -552,6 +892,7 @@ def page_shell(site_title, body, crumb_html, depth):
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>{html.escape(site_title)}</title>
 <style>{CSS}</style>
+{katex_head}
 </head>
 <body>
 <div class="wrap">
@@ -566,6 +907,7 @@ Generated by ongo-site from the kendb publish set (kind: ongo-web).
 Static, self-contained, no external assets.
 </footer>
 </div>
+{katex_tail}
 </body>
 </html>
 """
@@ -721,6 +1063,11 @@ def _build_into(args, out_dir, work_dir):
         shutil.rmtree(work_dir)
     os.makedirs(os.path.join(work_dir, "items"), exist_ok=True)
 
+    # Vendor KaTeX once into assets/katex/ (build-time fetch allowed; the
+    # published site references it via relative paths only). On any failure
+    # katex_ok is False and pages degrade to raw `$...$` (logged, no crash).
+    katex_ok = vendor_katex(work_dir, log)
+
     # Per-item pages.
     for item in sorted(items.values(), key=lambda x: x["slug"]):
         src = item["source"]
@@ -729,13 +1076,14 @@ def _build_into(args, out_dir, work_dir):
             + html.escape(item["display"])
             + "</div>"
         )
+        page_uses_katex = False
         if src["kind"] == "pdf":
             pdf_name = os.path.basename(src["path"])
             assets_dir = os.path.join(work_dir, "items", "assets")
             os.makedirs(assets_dir, exist_ok=True)
             shutil.copyfile(src["path"], os.path.join(assets_dir, pdf_name))
             body = (
-                f"<h1>{html.escape(item['display'])}</h1>"
+                f'<h1 id="title">{html.escape(item["display"])}</h1>'
                 f'<p><a href="assets/{html.escape(pdf_name)}">'
                 f"Download PDF</a></p>"
                 f'<iframe class="embed" src="assets/'
@@ -743,15 +1091,36 @@ def _build_into(args, out_dir, work_dir):
             )
         else:
             resolver = make_link_resolver(depth=1)
-            html_body = markdown_to_html(src["body"], resolver)
+            raw = src["body"]
+            # Extract math BEFORE Markdown/HTML so TeX is never mangled.
+            if katex_ok:
+                raw, math_map = extract_math(raw)
+            else:
+                math_map = {}
+            html_body, toc = markdown_to_html(
+                raw, resolver, collect_toc=True
+            )
+            if math_map:
+                html_body = reinsert_math(html_body, math_map)
+                page_uses_katex = "ongo-math" in html_body
             # Ensure a visible title even if body lacks an H1.
-            if "<h1>" not in html_body:
+            if "<h1" not in html_body:
                 html_body = (
-                    f"<h1>{html.escape(item['display'])}</h1>\n" + html_body
+                    f'<h1 id="title">{html.escape(item["display"])}</h1>\n'
+                    + html_body
                 )
-            body = html_body
+            # Per-article TOC from the collected headings (skip a lone H1
+            # that just repeats the title — render_toc drops <2 entries).
+            toc_for_nav = [
+                (lvl, aid, txt)
+                for (lvl, aid, txt) in toc
+                if not (lvl == 1 and len(toc) and toc[0] == (lvl, aid, txt))
+            ] or toc
+            toc_html = render_toc(toc_for_nav, "Contents")
+            body = (toc_html + "\n" + html_body) if toc_html else html_body
         page = page_shell(
-            args.site_title, body, crumb, depth=1
+            args.site_title, body, crumb, depth=1,
+            with_katex=(katex_ok and page_uses_katex),
         )
         with open(
             os.path.join(work_dir, item["page_path"]),
@@ -760,18 +1129,37 @@ def _build_into(args, out_dir, work_dir):
         ) as fh:
             fh.write(page)
 
-    # Index page: topics -> items, deterministic ordering.
-    sections = []  # (heading, sort_key, [items])
+    # Index page: topic sections are the PRIMARY structure. ongo has no
+    # freeform tags; kendb `topic` publications + related-to/cites/
+    # derives-from edges (and section overrides) ARE the tags. Items with
+    # no topic land in a clearly-labelled "Other / Ungrouped" section.
+    OTHER_HEADING = "Other / Ungrouped"
+    sections = []  # (heading, is_other, [items])
     for (kind, gid), gitems in grouped.items():
         if kind == "topic":
             heading = topics[gid]["title"] or topics[gid].get("key") or gid
+            sections.append((heading, False, gitems))
         elif kind == "override":
-            heading = gid
+            sections.append((gid, False, gitems))
         else:
-            heading = "Other notes"
-        sections.append((heading, gitems))
+            sections.append((OTHER_HEADING, True, gitems))
 
-    sections.sort(key=lambda s: s[0].lower())
+    # Deterministic: real topics A->Z, the Other bucket always last.
+    sections.sort(key=lambda s: (s[1], s[0].lower()))
+
+    # Assign a stable anchor id per section for the Contents nav.
+    seen_sec = {}
+    nav_entries = []  # (level, anchor_id, text) for render_toc
+    for idx, (heading, is_other, gitems) in enumerate(sections):
+        base = slugify(heading, "section-%d" % idx) or "section-%d" % idx
+        if base in seen_sec:
+            seen_sec[base] += 1
+            sec_id = "%s-%d" % (base, seen_sec[base])
+        else:
+            seen_sec[base] = 0
+            sec_id = base
+        sections[idx] = (heading, is_other, gitems, sec_id)
+        nav_entries.append((2, sec_id, "%s (%d)" % (heading, len(gitems))))
 
     index_body = ["<h1>" + html.escape(args.site_title) + "</h1>"]
     if not items:
@@ -780,9 +1168,19 @@ def _build_into(args, out_dir, work_dir):
             "<code>ken add ongo-web -k &lt;note-id&gt; "
             "--title &quot;…&quot;</code>.</p>"
         )
-    for heading, gitems in sections:
+    else:
+        # Top "Contents" nav: one in-page link per topic section.
+        index_body.append(render_toc(nav_entries, "Contents"))
+    for heading, is_other, gitems, sec_id in sections:
         index_body.append('<div class="topic">')
-        index_body.append("<h2>" + html.escape(heading) + "</h2>")
+        index_body.append(
+            '<h2 id="%s">%s <span class="count">(%d)</span></h2>'
+            % (
+                html.escape(sec_id, quote=True),
+                html.escape(heading),
+                len(gitems),
+            )
+        )
         index_body.append("<ul>")
         for item in sorted(gitems, key=lambda x: x["display"].lower()):
             index_body.append(
@@ -806,9 +1204,17 @@ def _build_into(args, out_dir, work_dir):
 
     conn.close()
 
+    # Drop the KaTeX download scratch dir so it never reaches the published
+    # tree (the vendored copy already lives at assets/katex/). Build-time
+    # only artifact; runtime stays self-contained and minimal.
+    katex_scratch = os.path.join(work_dir, "_katex")
+    if os.path.isdir(katex_scratch):
+        shutil.rmtree(katex_scratch, ignore_errors=True)
+
     # Build log (also written into the site dir for auditability).
     log.append(f"published items: {len(items)}")
     log.append(f"sections: {len(sections)}")
+    log.append(f"katex: {'vendored' if katex_ok else 'unavailable (raw)'}")
     log_text = "\n".join(log) + "\n"
     with open(
         os.path.join(work_dir, "build.log"), "w", encoding="utf-8"
