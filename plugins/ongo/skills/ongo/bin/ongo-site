@@ -792,58 +792,187 @@ def markdown_to_html(md, link_resolver, collect_toc=False):
 # --------------------------------------------------------------------------- #
 
 CSS = """\
-:root{--fg:#1b1b1f;--bg:#fbfbfa;--muted:#6b6b75;--accent:#3a5a99;
---border:#e2e2e0;--code-bg:#f0f0ee}
+:root{
+--fg:#22232b;--fg-soft:#3c3d47;--bg:#fcfcfb;--surface:#ffffff;
+--muted:#6a6b78;--accent:#3a5a99;--accent-hover:#284077;
+--border:#e5e5e1;--border-soft:#eeeeea;--code-bg:#f4f4f1;
+--code-fg:#1f2430;--mark:#fff3bf;--shadow:0 1px 2px rgba(20,20,30,.04),
+0 8px 24px rgba(20,20,30,.05);
+--serif:Charter,"Iowan Old Style","Source Serif Pro",
+"Apple Garamond",Georgia,Cambria,"Times New Roman",serif;
+--sans:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,
+Arial,"Helvetica Neue",sans-serif;
+--mono:"SFMono-Regular",ui-monospace,"JetBrains Mono","Cascadia Code",
+Menlo,Consolas,"Liberation Mono",monospace}
+@media (prefers-color-scheme:dark){:root{
+--fg:#e7e7ea;--fg-soft:#c6c7cf;--bg:#16171c;--surface:#1e1f26;
+--muted:#9698a6;--accent:#8fb0e8;--accent-hover:#b3c9f2;
+--border:#30323b;--border-soft:#26272f;--code-bg:#23242c;
+--code-fg:#dfe2ea;--mark:#5a4c1f;
+--shadow:0 1px 2px rgba(0,0,0,.3),0 8px 24px rgba(0,0,0,.35)}}
 *{box-sizing:border-box}
-body{margin:0;font:16px/1.65 -apple-system,BlinkMacSystemFont,"Segoe UI",
-Roboto,Helvetica,Arial,sans-serif;color:var(--fg);background:var(--bg)}
-.wrap{max-width:760px;margin:0 auto;padding:2.5rem 1.25rem 5rem}
-header.site{border-bottom:1px solid var(--border);margin-bottom:2rem;
-padding-bottom:1rem}
-header.site a{color:var(--fg);text-decoration:none;font-weight:600;
-font-size:1.15rem}
-header.site .tag{color:var(--muted);font-size:.85rem;margin-top:.25rem}
-h1,h2,h3,h4{line-height:1.25;margin:1.8rem 0 .8rem}
-h1{font-size:1.9rem}h2{font-size:1.45rem}h3{font-size:1.2rem}
-a{color:var(--accent)}
-p{margin:.9rem 0}
-ul,ol{margin:.9rem 0;padding-left:1.5rem}li{margin:.3rem 0}
-code{background:var(--code-bg);padding:.12em .35em;border-radius:3px;
-font-size:.9em}
-pre{background:var(--code-bg);padding:1rem;border-radius:6px;overflow:auto}
-pre code{background:none;padding:0}
-blockquote{margin:1rem 0;padding:.3rem 1rem;border-left:3px solid
-var(--border);color:var(--muted)}
-hr{border:none;border-top:1px solid var(--border);margin:2rem 0}
-.topic{margin:2.5rem 0}
-.topic h2{border-bottom:2px solid var(--accent);padding-bottom:.3rem;
-scroll-margin-top:1rem}
-.topic .count{color:var(--muted);font-size:.8rem;font-weight:400}
-.topic ul{list-style:none;padding-left:0}
-.topic li{margin:.5rem 0}
-.crumb{font-size:.85rem;color:var(--muted);margin-bottom:1.5rem}
-.crumb a{color:var(--muted)}
-nav.toc{background:var(--code-bg);border:1px solid var(--border);
-border-radius:6px;padding:1rem 1.25rem;margin:1.5rem 0}
-nav.toc .toc-title{font-weight:600;font-size:.95rem;margin-bottom:.5rem;
-color:var(--fg)}
-nav.toc ul{list-style:none;margin:.3rem 0;padding-left:0}
-nav.toc ol{list-style:none;margin:.3rem 0;padding-left:0}
-nav.toc li{margin:.3rem 0;font-size:.92rem}
-nav.toc a{text-decoration:none}
-nav.toc a:hover{text-decoration:underline}
-nav.toc .lvl-2{padding-left:1rem}nav.toc .lvl-3{padding-left:2rem}
-nav.toc .lvl-4{padding-left:3rem}nav.toc .lvl-5{padding-left:4rem}
-nav.toc .lvl-6{padding-left:5rem}
-h1,h2,h3,h4,h5,h6{scroll-margin-top:1rem}
-.anchor{color:var(--border);text-decoration:none;margin-left:.4rem;
-font-weight:400;opacity:0;font-size:.8em}
+html{-webkit-text-size-adjust:100%}
+body{margin:0;font-family:var(--sans);font-size:18px;line-height:1.7;
+color:var(--fg);background:var(--bg);
+font-feature-settings:"kern" 1,"liga" 1;
+text-rendering:optimizeLegibility;
+-webkit-font-smoothing:antialiased;-moz-osx-font-smoothing:grayscale}
+.wrap{max-width:46rem;margin:0 auto;padding:2.5rem 1.4rem 6rem}
+::selection{background:var(--mark);color:var(--fg)}
+a{color:var(--accent);text-decoration:none;
+text-underline-offset:.16em;text-decoration-thickness:.06em}
+a:hover{color:var(--accent-hover);text-decoration:underline}
+
+header.site{display:flex;align-items:baseline;justify-content:space-between;
+gap:1rem;flex-wrap:wrap;border-bottom:1px solid var(--border);
+margin-bottom:2.5rem;padding-bottom:1.1rem}
+header.site .brand{display:flex;flex-direction:column;gap:.15rem}
+header.site a.home{color:var(--fg);font-weight:700;font-size:1.2rem;
+letter-spacing:-.01em}
+header.site a.home:hover{color:var(--accent);text-decoration:none}
+header.site .tag{color:var(--muted);font-size:.82rem;
+letter-spacing:.02em;text-transform:uppercase}
+header.site nav.top a{color:var(--muted);font-size:.85rem;
+font-weight:500;margin-left:1rem}
+header.site nav.top a:hover{color:var(--accent)}
+
+article{font-family:var(--serif)}
+article > h1:first-child,h1.page-title{font-family:var(--sans);
+font-size:2.35rem;line-height:1.15;letter-spacing:-.02em;
+margin:.2rem 0 .4rem;font-weight:800}
+.byline{font-family:var(--sans);color:var(--muted);font-size:.85rem;
+margin:0 0 2rem;padding-bottom:1.4rem;border-bottom:1px solid var(--border-soft)}
+h1,h2,h3,h4,h5,h6{font-family:var(--sans);line-height:1.25;
+letter-spacing:-.015em;color:var(--fg);scroll-margin-top:1.5rem;
+position:relative}
+h1{font-size:2.1rem;margin:2.6rem 0 1rem;font-weight:800}
+h2{font-size:1.6rem;margin:2.6rem 0 .9rem;font-weight:700;
+padding-bottom:.3rem;border-bottom:1px solid var(--border-soft)}
+h3{font-size:1.28rem;margin:2rem 0 .7rem;font-weight:700}
+h4{font-size:1.08rem;margin:1.7rem 0 .6rem;font-weight:700}
+h5{font-size:.95rem;margin:1.5rem 0 .5rem;font-weight:700;
+text-transform:uppercase;letter-spacing:.05em;color:var(--fg-soft)}
+h6{font-size:.85rem;margin:1.4rem 0 .5rem;font-weight:700;
+text-transform:uppercase;letter-spacing:.06em;color:var(--muted)}
+p{margin:1.05rem 0;color:var(--fg-soft)}
+article p{font-size:1.06rem}
+strong{color:var(--fg);font-weight:700}
+ul,ol{margin:1.05rem 0;padding-left:1.5rem}
+li{margin:.4rem 0;color:var(--fg-soft)}
+li::marker{color:var(--muted)}
+img{max-width:100%;height:auto;border-radius:6px}
+figure{margin:1.8rem 0;text-align:center}
+figcaption{font-family:var(--sans);font-size:.85rem;color:var(--muted);
+margin-top:.5rem}
+
+code{font-family:var(--mono);font-size:.86em;background:var(--code-bg);
+color:var(--code-fg);padding:.15em .4em;border-radius:4px;
+border:1px solid var(--border-soft)}
+pre{background:var(--code-bg);color:var(--code-fg);padding:1.1rem 1.25rem;
+border-radius:8px;border:1px solid var(--border-soft);overflow:auto;
+font-size:.86rem;line-height:1.6;margin:1.5rem 0}
+pre code{background:none;border:none;padding:0;font-size:1em}
+blockquote{margin:1.6rem 0;padding:.3rem 0 .3rem 1.4rem;
+border-left:3px solid var(--accent);color:var(--muted);
+font-style:italic}
+blockquote p{color:var(--muted)}
+hr{border:none;border-top:1px solid var(--border);margin:2.6rem 0}
+table{width:100%;border-collapse:collapse;margin:1.6rem 0;
+font-family:var(--sans);font-size:.92rem}
+th,td{text-align:left;padding:.55rem .8rem;border-bottom:1px solid var(--border)}
+th{font-weight:700;color:var(--fg);border-bottom:2px solid var(--border)}
+tr:hover td{background:var(--code-bg)}
+
+.lede{font-family:var(--sans);color:var(--muted);font-size:.85rem;
+margin:0 0 .6rem;letter-spacing:.04em;text-transform:uppercase}
+.intro{font-size:1.05rem;color:var(--muted);max-width:38rem;
+margin:.4rem 0 2.6rem}
+.topic{margin:0 0 2.6rem;background:var(--surface);
+border:1px solid var(--border);border-radius:12px;
+padding:1.4rem 1.6rem;box-shadow:var(--shadow)}
+.topic.other{background:transparent;box-shadow:none;
+border-style:dashed;border-color:var(--border)}
+.topic h2{border:none;margin:0 0 .9rem;font-size:1.3rem;
+scroll-margin-top:1.5rem;display:flex;align-items:baseline;
+justify-content:space-between;gap:.6rem;padding:0}
+.topic h2 a.shead{color:var(--fg)}
+.topic h2 a.shead:hover{color:var(--accent);text-decoration:none}
+.topic .count{color:var(--muted);font-size:.78rem;font-weight:600;
+font-family:var(--sans);background:var(--code-bg);
+border:1px solid var(--border-soft);border-radius:999px;
+padding:.1rem .55rem;white-space:nowrap}
+.topic ul{list-style:none;padding:0;margin:0;
+border-top:1px solid var(--border-soft)}
+.topic li{margin:0;border-bottom:1px solid var(--border-soft)}
+.topic li:last-child{border-bottom:none}
+.topic li a{display:block;padding:.6rem .2rem;color:var(--fg);
+font-family:var(--sans);font-size:1rem;font-weight:500;
+transition:padding-left .12s ease,color .12s ease}
+.topic li a:hover{color:var(--accent);text-decoration:none;
+padding-left:.6rem}
+
+.crumb{font-family:var(--sans);font-size:.85rem;color:var(--muted);
+margin:0 0 1.8rem}
+.crumb a{color:var(--muted);font-weight:500}
+.crumb a:hover{color:var(--accent)}
+
+nav.toc{background:var(--surface);border:1px solid var(--border);
+border-radius:10px;padding:1.1rem 1.4rem;margin:0 0 2.4rem;
+font-family:var(--sans);box-shadow:var(--shadow)}
+nav.toc .toc-title{font-weight:700;font-size:.78rem;
+text-transform:uppercase;letter-spacing:.07em;color:var(--muted);
+margin-bottom:.7rem}
+nav.toc ul,nav.toc ol{list-style:none;margin:0;padding:0}
+nav.toc li{margin:.12rem 0;font-size:.92rem}
+nav.toc a{display:block;padding:.22rem .5rem;border-radius:5px;
+color:var(--fg-soft);border-left:2px solid transparent}
+nav.toc a:hover{background:var(--code-bg);color:var(--accent);
+border-left-color:var(--accent);text-decoration:none}
+nav.toc .lvl-1{font-weight:600}
+nav.toc .lvl-2{padding-left:.9rem}nav.toc .lvl-3{padding-left:1.9rem}
+nav.toc .lvl-4{padding-left:2.9rem}nav.toc .lvl-5{padding-left:3.9rem}
+nav.toc .lvl-6{padding-left:4.9rem}
+
+.anchor{position:absolute;left:-1.1rem;color:var(--border);
+text-decoration:none;font-weight:400;opacity:0;font-size:.85em;
+padding:0 .25rem;transition:opacity .12s ease}
 h1:hover .anchor,h2:hover .anchor,h3:hover .anchor,h4:hover .anchor,
 h5:hover .anchor,h6:hover .anchor{opacity:1}
-div.ongo-math{overflow-x:auto;margin:1rem 0}
-footer.site{margin-top:4rem;padding-top:1rem;border-top:1px solid
-var(--border);color:var(--muted);font-size:.82rem}
-.embed{width:100%;height:80vh;border:1px solid var(--border);border-radius:6px}
+.anchor:hover{color:var(--accent)}
+@media (max-width:640px){.anchor{display:none}}
+
+.pager{display:flex;justify-content:space-between;gap:1rem;
+flex-wrap:wrap;margin:3rem 0 0;padding-top:1.6rem;
+border-top:1px solid var(--border);font-family:var(--sans)}
+.pager a{display:inline-flex;flex-direction:column;max-width:48%;
+font-size:.95rem;font-weight:600}
+.pager a.next{text-align:right;margin-left:auto}
+.pager a span{font-size:.72rem;font-weight:600;color:var(--muted);
+text-transform:uppercase;letter-spacing:.05em}
+
+div.ongo-math{overflow-x:auto;overflow-y:hidden;margin:1.5rem 0;
+padding:.2rem 0}
+.katex{font-size:1.05em}
+footer.site{margin-top:4.5rem;padding-top:1.3rem;
+border-top:1px solid var(--border);color:var(--muted);
+font-size:.8rem;font-family:var(--sans);line-height:1.6}
+.embed{width:100%;height:82vh;border:1px solid var(--border);
+border-radius:8px;background:var(--surface)}
+
+html{scroll-behavior:smooth}
+@media (prefers-reduced-motion:reduce){
+html{scroll-behavior:auto}
+*{transition:none!important}}
+
+@media print{
+body{background:#fff;color:#000;font-size:11pt}
+.wrap{max-width:100%;padding:0}
+header.site nav.top,nav.toc,.pager,.anchor,.crumb{display:none}
+.topic{box-shadow:none;border:1px solid #ccc}
+a{color:#000;text-decoration:underline}
+pre,code{background:#f5f5f5;border:1px solid #ddd}
+h2,h3{page-break-after:avoid}
+pre,blockquote,figure,table{page-break-inside:avoid}}
 """
 
 
@@ -872,7 +1001,8 @@ def render_toc(toc, title="Contents"):
     return "\n".join(parts)
 
 
-def page_shell(site_title, body, crumb_html, depth, with_katex=False):
+def page_shell(site_title, body, crumb_html, depth, with_katex=False,
+               page_title=None):
     up = "../" * depth
     katex_head = ""
     katex_tail = ""
@@ -885,26 +1015,37 @@ def page_shell(site_title, body, crumb_html, depth, with_katex=False):
             '<script defer src="%sassets/katex/katex.min.js"></script>\n'
             '<script defer>%s</script>' % (up, KATEX_RUNTIME_JS)
         )
+    doc_title = site_title
+    if page_title and page_title != site_title:
+        doc_title = "%s — %s" % (page_title, site_title)
     return f"""<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>{html.escape(site_title)}</title>
+<meta name="color-scheme" content="light dark">
+<meta name="generator" content="ongo-site">
+<title>{html.escape(doc_title)}</title>
 <style>{CSS}</style>
 {katex_head}
 </head>
 <body>
 <div class="wrap">
 <header class="site">
-<a href="{up}index.html">{html.escape(site_title)}</a>
-<div class="tag">Published research notes</div>
+<div class="brand">
+<a class="home" href="{up}index.html">{html.escape(site_title)}</a>
+<div class="tag">Research notes</div>
+</div>
+<nav class="top">
+<a href="{up}index.html">Index</a>
+</nav>
 </header>
 {crumb_html}
 {body}
 <footer class="site">
-Generated by ongo-site from the kendb publish set (kind: ongo-web).
-Static, self-contained, no external assets.
+<p>Generated by <strong>ongo-site</strong> from the kendb publish set
+(kind:&nbsp;<code>ongo-web</code>). Static and self-contained — no external
+runtime assets. Math typeset with locally vendored KaTeX.</p>
 </footer>
 </div>
 {katex_tail}
@@ -1068,11 +1209,14 @@ def _build_into(args, out_dir, work_dir):
     # katex_ok is False and pages degrade to raw `$...$` (logged, no crash).
     katex_ok = vendor_katex(work_dir, log)
 
-    # Per-item pages.
-    for item in sorted(items.values(), key=lambda x: x["slug"]):
+    # Per-item pages. Build an ordered list first so each page can carry
+    # prev/next inter-article navigation (deterministic: slug order).
+    ordered = sorted(items.values(), key=lambda x: x["slug"])
+    for pos, item in enumerate(ordered):
         src = item["source"]
         crumb = (
-            '<div class="crumb"><a href="../index.html">Index</a> / '
+            '<div class="crumb"><a href="../index.html">Index</a>'
+            ' <span aria-hidden="true">/</span> '
             + html.escape(item["display"])
             + "</div>"
         )
@@ -1082,12 +1226,14 @@ def _build_into(args, out_dir, work_dir):
             assets_dir = os.path.join(work_dir, "items", "assets")
             os.makedirs(assets_dir, exist_ok=True)
             shutil.copyfile(src["path"], os.path.join(assets_dir, pdf_name))
-            body = (
-                f'<h1 id="title">{html.escape(item["display"])}</h1>'
+            article = (
+                f'<h1 class="page-title">{html.escape(item["display"])}</h1>'
+                f'<p class="byline">PDF document</p>'
                 f'<p><a href="assets/{html.escape(pdf_name)}">'
-                f"Download PDF</a></p>"
-                f'<iframe class="embed" src="assets/'
-                f'{html.escape(pdf_name)}"></iframe>'
+                f"↓ Download PDF</a></p>"
+                f'<iframe class="embed" title='
+                f'"{html.escape(item["display"], quote=True)}" '
+                f'src="assets/{html.escape(pdf_name)}"></iframe>'
             )
         else:
             resolver = make_link_resolver(depth=1)
@@ -1106,7 +1252,8 @@ def _build_into(args, out_dir, work_dir):
             # Ensure a visible title even if body lacks an H1.
             if "<h1" not in html_body:
                 html_body = (
-                    f'<h1 id="title">{html.escape(item["display"])}</h1>\n'
+                    f'<h1 class="page-title" id="title">'
+                    f'{html.escape(item["display"])}</h1>\n'
                     + html_body
                 )
             # Per-article TOC from the collected headings (skip a lone H1
@@ -1116,11 +1263,45 @@ def _build_into(args, out_dir, work_dir):
                 for (lvl, aid, txt) in toc
                 if not (lvl == 1 and len(toc) and toc[0] == (lvl, aid, txt))
             ] or toc
-            toc_html = render_toc(toc_for_nav, "Contents")
-            body = (toc_html + "\n" + html_body) if toc_html else html_body
+            toc_html = render_toc(toc_for_nav, "On this page")
+            byline = (
+                '<p class="byline">A published research note</p>'
+            )
+            article = (
+                byline + "\n" + toc_html + "\n" + html_body
+                if toc_html
+                else byline + "\n" + html_body
+            )
+        # Prev / next inter-article navigation.
+        pager_parts = []
+        if pos > 0:
+            prev = ordered[pos - 1]
+            pager_parts.append(
+                '<a class="prev" href="../%s"><span>← Previous</span>%s</a>'
+                % (
+                    html.escape(prev["page_path"], quote=True),
+                    html.escape(prev["display"]),
+                )
+            )
+        if pos < len(ordered) - 1:
+            nxt = ordered[pos + 1]
+            pager_parts.append(
+                '<a class="next" href="../%s"><span>Next →</span>%s</a>'
+                % (
+                    html.escape(nxt["page_path"], quote=True),
+                    html.escape(nxt["display"]),
+                )
+            )
+        pager = (
+            '<nav class="pager">' + "".join(pager_parts) + "</nav>"
+            if pager_parts
+            else ""
+        )
+        body = "<article>\n" + article + "\n</article>\n" + pager
         page = page_shell(
             args.site_title, body, crumb, depth=1,
             with_katex=(katex_ok and page_uses_katex),
+            page_title=item["display"],
         )
         with open(
             os.path.join(work_dir, item["page_path"]),
@@ -1161,24 +1342,42 @@ def _build_into(args, out_dir, work_dir):
         sections[idx] = (heading, is_other, gitems, sec_id)
         nav_entries.append((2, sec_id, "%s (%d)" % (heading, len(gitems))))
 
-    index_body = ["<h1>" + html.escape(args.site_title) + "</h1>"]
+    total_items = len(items)
+    index_body = [
+        '<p class="lede">Research notes</p>',
+        '<h1 class="page-title">' + html.escape(args.site_title) + "</h1>",
+    ]
     if not items:
         index_body.append(
-            "<p>No published items yet. Mark content with "
+            '<p class="intro">No published items yet. Mark content with '
             "<code>ken add ongo-web -k &lt;note-id&gt; "
             "--title &quot;…&quot;</code>.</p>"
         )
     else:
+        index_body.append(
+            '<p class="intro">%d published note%s across %d '
+            "section%s, grouped by topic.</p>"
+            % (
+                total_items,
+                "" if total_items == 1 else "s",
+                len(sections),
+                "" if len(sections) == 1 else "s",
+            )
+        )
         # Top "Contents" nav: one in-page link per topic section.
         index_body.append(render_toc(nav_entries, "Contents"))
     for heading, is_other, gitems, sec_id in sections:
-        index_body.append('<div class="topic">')
+        cls = "topic other" if is_other else "topic"
+        index_body.append('<section class="%s">' % cls)
         index_body.append(
-            '<h2 id="%s">%s <span class="count">(%d)</span></h2>'
+            '<h2 id="%s"><a class="shead" href="#%s">%s</a>'
+            '<span class="count">%d note%s</span></h2>'
             % (
+                html.escape(sec_id, quote=True),
                 html.escape(sec_id, quote=True),
                 html.escape(heading),
                 len(gitems),
+                "" if len(gitems) == 1 else "s",
             )
         )
         index_body.append("<ul>")
@@ -1191,7 +1390,7 @@ def _build_into(args, out_dir, work_dir):
                 )
             )
         index_body.append("</ul>")
-        index_body.append("</div>")
+        index_body.append("</section>")
 
     with open(
         os.path.join(work_dir, "index.html"), "w", encoding="utf-8"
