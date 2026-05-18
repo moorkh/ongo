@@ -1073,28 +1073,18 @@ def derive_item_date(key, title, created_at):
         return ("%s %d, %d" % (name, d, y)) if with_day \
             else ("%s %d" % (name, y))
 
-    # 1. date encoded in the key.
+    # Every item gets a PRECISE (day-level) date. Priority:
+    # 1. a full YYYY-MM-DD encoded in the key (has explicit day).
     if key:
         m = _KEY_DATE.search(key)
-        if m:
-            y = int(m.group(1))
-            mo = int(m.group(2))
-            has_day = m.group(3) is not None
-            d = int(m.group(3)) if has_day else 1
+        if m and m.group(3) is not None:
+            y, mo, d = int(m.group(1)), int(m.group(2)), int(m.group(3))
             if _ok(y, mo, d):
                 return ("%04d-%02d-%02d" % (y, mo, d),
-                        _label(y, mo, d, has_day))
+                        _label(y, mo, d, True))
 
-    # 2. Month-Year in the title.
-    if title:
-        m = _TITLE_DATE.search(title)
-        if m:
-            mo = _MONTHS[m.group(1).lower()[:3]]
-            y = int(m.group(2))
-            if _ok(y, mo, 1):
-                return ("%04d-%02d-01" % (y, mo), _label(y, mo, 1, False))
-
-    # 3. fall back to created_at (stable, deterministic).
+    # 2. the publication's created_at (always present, exact to the day,
+    #    stable across runs -> precise + deterministic).
     if created_at:
         m = re.match(r"\s*(\d{4})-(\d{2})-(\d{2})", str(created_at))
         if m:
@@ -1102,6 +1092,22 @@ def derive_item_date(key, title, created_at):
             if _ok(y, mo, d):
                 return ("%04d-%02d-%02d" % (y, mo, d),
                         _label(y, mo, d, True))
+
+    # 3. last resort only if created_at is somehow absent: month from
+    #    key or title (day -> 1st), still rendered with a day.
+    if key:
+        m = _KEY_DATE.search(key)
+        if m:
+            y, mo = int(m.group(1)), int(m.group(2))
+            if _ok(y, mo, 1):
+                return ("%04d-%02d-01" % (y, mo), _label(y, mo, 1, True))
+    if title:
+        m = _TITLE_DATE.search(title)
+        if m:
+            mo = _MONTHS[m.group(1).lower()[:3]]
+            y = int(m.group(2))
+            if _ok(y, mo, 1):
+                return ("%04d-%02d-01" % (y, mo), _label(y, mo, 1, True))
     return ("0000-00-00", "Undated")
 
 
