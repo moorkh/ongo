@@ -19,10 +19,10 @@ The generator:
      compatibility fallback that reads the same first-class `notes` data
      by issuing direct SQL against ken's internal schema from outside the
      tool), or finally the publication title.
-  3. Groups published items under their kendb topic(s) (topic publications +
-     `related-to` / `cites` / `derives-from` relationships) into a clean
-     topic-sectioned index with a top "Contents" nav (in-page anchor links
-     per topic section); items with no topic go under "Other / Ungrouped".
+  3. Emits the index as a SINGLE GLOBAL FLAT LIST of every published item
+     (no topic grouping, no per-topic nav): reverse-chronological (newest
+     first), ties broken alphabetically by title (A->Z). Each row shows the
+     item's derived date. See `derive_item_date` for the date rule.
   4. Renders each article with a per-article table of contents built from
      its Markdown headings (anchor ids + links), auto-links bare http/https
      URLs (external links get target=_blank rel=noopener), and renders
@@ -187,7 +187,8 @@ def db_connect(db_path):
 
 def fetch_publication(conn, pub_id):
     return conn.execute(
-        "SELECT id, key, kind, title FROM publications WHERE id = ?",
+        "SELECT id, key, kind, title, created_at "
+        "FROM publications WHERE id = ?",
         (pub_id,),
     ).fetchone()
 
@@ -200,7 +201,7 @@ def fetch_publication_by_key(conn, key):
     kind and prefer a deterministic order.
     """
     return conn.execute(
-        "SELECT id, key, kind, title FROM publications "
+        "SELECT id, key, kind, title, created_at FROM publications "
         "WHERE key = ? AND kind != 'ongo-web' "
         "ORDER BY created_at, id LIMIT 1",
         (key,),
@@ -470,6 +471,36 @@ KATEX_RUNTIME_JS = """\
       el.textContent=(display?"$$":"$")+tex+(display?"$$":"$");
     }
   }
+})();
+"""
+
+
+# Light/dark theme toggle (pure vanilla, no deps). On load: saved choice in
+# localStorage("ongo-theme") wins; else fall back to the OS preference
+# (prefers-color-scheme). Clicking the header control flips and persists it.
+# The early inline part (THEME_INIT_JS) runs in <head> before paint to set
+# data-theme and avoid a flash; THEME_TOGGLE_JS wires the button at end.
+THEME_INIT_JS = """\
+(function(){try{
+var s=localStorage.getItem("ongo-theme");
+var m=window.matchMedia&&window.matchMedia("(prefers-color-scheme:dark)").matches;
+var t=(s==="light"||s==="dark")?s:(m?"dark":"light");
+document.documentElement.setAttribute("data-theme",t);
+}catch(e){}})();
+"""
+
+THEME_TOGGLE_JS = """\
+(function(){
+var b=document.getElementById("theme-toggle");if(!b)return;
+function cur(){return document.documentElement.getAttribute("data-theme")||"light";}
+function paint(){b.setAttribute("aria-label","Switch to "+(cur()==="dark"?"light":"dark")+" mode");
+b.textContent=cur()==="dark"?"\\u2600":"\\u263E";}
+paint();
+b.addEventListener("click",function(){
+var t=cur()==="dark"?"light":"dark";
+document.documentElement.setAttribute("data-theme",t);
+try{localStorage.setItem("ongo-theme",t);}catch(e){}
+paint();});
 })();
 """
 
@@ -804,7 +835,18 @@ CSS = """\
 Arial,"Helvetica Neue",sans-serif;
 --mono:"SFMono-Regular",ui-monospace,"JetBrains Mono","Cascadia Code",
 Menlo,Consolas,"Liberation Mono",monospace}
-@media (prefers-color-scheme:dark){:root{
+/* Dark palette. Applied when the user explicitly chose dark
+(html[data-theme=dark]) OR when the OS prefers dark AND the user has not
+explicitly chosen light (html[data-theme=light] opts out of the media
+query). The toggle persists the choice in localStorage; an early inline
+script sets data-theme before paint so there is no flash. */
+:root[data-theme=dark]{
+--fg:#e7e7ea;--fg-soft:#c6c7cf;--bg:#16171c;--surface:#1e1f26;
+--muted:#9698a6;--accent:#8fb0e8;--accent-hover:#b3c9f2;
+--border:#30323b;--border-soft:#26272f;--code-bg:#23242c;
+--code-fg:#dfe2ea;--mark:#5a4c1f;
+--shadow:0 1px 2px rgba(0,0,0,.3),0 8px 24px rgba(0,0,0,.35)}
+@media (prefers-color-scheme:dark){:root:not([data-theme=light]){
 --fg:#e7e7ea;--fg-soft:#c6c7cf;--bg:#16171c;--surface:#1e1f26;
 --muted:#9698a6;--accent:#8fb0e8;--accent-hover:#b3c9f2;
 --border:#30323b;--border-soft:#26272f;--code-bg:#23242c;
@@ -832,9 +874,30 @@ letter-spacing:-.01em}
 header.site a.home:hover{color:var(--accent);text-decoration:none}
 header.site .tag{color:var(--muted);font-size:.82rem;
 letter-spacing:.02em;text-transform:uppercase}
+header.site nav.top{display:flex;align-items:center;gap:1rem}
 header.site nav.top a{color:var(--muted);font-size:.85rem;
-font-weight:500;margin-left:1rem}
+font-weight:500}
 header.site nav.top a:hover{color:var(--accent)}
+button.theme{font-family:var(--sans);cursor:pointer;color:var(--muted);
+background:var(--surface);border:1px solid var(--border);
+border-radius:999px;width:2rem;height:2rem;font-size:.95rem;line-height:1;
+padding:0;display:inline-flex;align-items:center;justify-content:center;
+transition:color .12s ease,border-color .12s ease}
+button.theme:hover{color:var(--accent);border-color:var(--accent)}
+button.theme:focus-visible{outline:2px solid var(--accent);
+outline-offset:2px}
+
+ul.index{list-style:none;padding:0;margin:1.4rem 0 0;
+border-top:1px solid var(--border-soft)}
+ul.index li{margin:0;border-bottom:1px solid var(--border-soft)}
+ul.index li a{display:flex;align-items:baseline;gap:1rem;
+justify-content:space-between;padding:.7rem .2rem;color:var(--fg);
+font-family:var(--sans);font-size:1.02rem;font-weight:500;
+transition:padding-left .12s ease,color .12s ease}
+ul.index li a:hover{color:var(--accent);text-decoration:none;
+padding-left:.5rem}
+ul.index .idate{color:var(--muted);font-size:.8rem;font-weight:600;
+font-variant-numeric:tabular-nums;white-space:nowrap;flex:none}
 
 article{font-family:var(--serif)}
 article > h1:first-child,h1.page-title{font-family:var(--sans);
@@ -887,29 +950,8 @@ tr:hover td{background:var(--code-bg)}
 margin:0 0 .6rem;letter-spacing:.04em;text-transform:uppercase}
 .intro{font-size:1.05rem;color:var(--muted);max-width:38rem;
 margin:.4rem 0 2.6rem}
-.topic{margin:0 0 2.6rem;background:var(--surface);
-border:1px solid var(--border);border-radius:12px;
-padding:1.4rem 1.6rem;box-shadow:var(--shadow)}
-.topic.other{background:transparent;box-shadow:none;
-border-style:dashed;border-color:var(--border)}
-.topic h2{border:none;margin:0 0 .9rem;font-size:1.3rem;
-scroll-margin-top:1.5rem;display:flex;align-items:baseline;
-justify-content:space-between;gap:.6rem;padding:0}
-.topic h2 a.shead{color:var(--fg)}
-.topic h2 a.shead:hover{color:var(--accent);text-decoration:none}
-.topic .count{color:var(--muted);font-size:.78rem;font-weight:600;
-font-family:var(--sans);background:var(--code-bg);
-border:1px solid var(--border-soft);border-radius:999px;
-padding:.1rem .55rem;white-space:nowrap}
-.topic ul{list-style:none;padding:0;margin:0;
-border-top:1px solid var(--border-soft)}
-.topic li{margin:0;border-bottom:1px solid var(--border-soft)}
-.topic li:last-child{border-bottom:none}
-.topic li a{display:block;padding:.6rem .2rem;color:var(--fg);
-font-family:var(--sans);font-size:1rem;font-weight:500;
-transition:padding-left .12s ease,color .12s ease}
-.topic li a:hover{color:var(--accent);text-decoration:none;
-padding-left:.6rem}
+ul.index li:last-child{border-bottom:none}
+ul.index .ititle{flex:1 1 auto}
 
 .crumb{font-family:var(--sans);font-size:.85rem;color:var(--muted);
 margin:0 0 1.8rem}
@@ -968,7 +1010,6 @@ html{scroll-behavior:auto}
 body{background:#fff;color:#000;font-size:11pt}
 .wrap{max-width:100%;padding:0}
 header.site nav.top,nav.toc,.pager,.anchor,.crumb{display:none}
-.topic{box-shadow:none;border:1px solid #ccc}
 a{color:#000;text-decoration:underline}
 pre,code{background:#f5f5f5;border:1px solid #ddd}
 h2,h3{page-break-after:avoid}
@@ -979,6 +1020,89 @@ pre,blockquote,figure,table{page-break-inside:avoid}}
 def slugify(text, fallback):
     s = re.sub(r"[^a-z0-9]+", "-", (text or "").lower()).strip("-")
     return s[:80] if s else fallback
+
+
+_MONTHS = {
+    "jan": 1, "feb": 2, "mar": 3, "apr": 4, "may": 5, "jun": 6,
+    "jul": 7, "aug": 8, "sep": 9, "oct": 10, "nov": 11, "dec": 12,
+}
+# YYYYMMDD or YYYY-MM-DD / YYYY_MM_DD anywhere in the key (e.g.
+# `note-20260517-foo`, `2026-05-17-clacks`). Day is optional.
+_KEY_DATE = re.compile(r"(\d{4})[-_]?(\d{2})[-_]?(\d{2})?")
+# "May 2026", "Apr. 2026", "September 2026" in a title.
+_TITLE_DATE = re.compile(
+    r"\b(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.?\s+(\d{4})",
+    re.I,
+)
+
+
+def _invert_date(iso):
+    """Map an ISO `YYYY-MM-DD` date to a key that sorts DESCENDING.
+
+    Each digit d is replaced by (9 - d); non-digits pass through. A later
+    date thus yields a lexicographically smaller key, so a single ascending
+    sort places newer items first. Deterministic and total.
+    """
+    return "".join(
+        str(9 - int(ch)) if ch.isdigit() else ch for ch in (iso or "")
+    )
+
+
+def derive_item_date(key, title, created_at):
+    """Derive a (sort_key, label) pair for an item's date.
+
+    Date rule (documented & deterministic), in priority order:
+      1. The target note's `key` if it encodes a date: a `YYYYMMDD` or
+         `YYYY-MM-DD` / `YYYY_MM_DD` run anywhere in the key (the day is
+         optional; missing day -> the 1st). Validated as a real date.
+      2. Else a Month-Year in the title (e.g. "May 2026", "Apr. 2026");
+         day defaults to the 1st.
+      3. Else fall back to the publication's `created_at` timestamp
+         (its leading `YYYY-MM-DD`), or "0000-00-00" if even that is
+         absent. This is stable across runs (created_at never changes),
+         so ordering stays deterministic.
+
+    sort_key is an ISO `YYYY-MM-DD` string (lexicographic == chronological);
+    label is a human "Mon YYYY" / "Mon D, YYYY" string for the index row.
+    """
+    def _ok(y, mo, d):
+        return 1900 <= y <= 2999 and 1 <= mo <= 12 and 1 <= d <= 31
+
+    def _label(y, mo, d, with_day):
+        name = [k for k, v in _MONTHS.items() if v == mo][0].capitalize()
+        return ("%s %d, %d" % (name, d, y)) if with_day \
+            else ("%s %d" % (name, y))
+
+    # 1. date encoded in the key.
+    if key:
+        m = _KEY_DATE.search(key)
+        if m:
+            y = int(m.group(1))
+            mo = int(m.group(2))
+            has_day = m.group(3) is not None
+            d = int(m.group(3)) if has_day else 1
+            if _ok(y, mo, d):
+                return ("%04d-%02d-%02d" % (y, mo, d),
+                        _label(y, mo, d, has_day))
+
+    # 2. Month-Year in the title.
+    if title:
+        m = _TITLE_DATE.search(title)
+        if m:
+            mo = _MONTHS[m.group(1).lower()[:3]]
+            y = int(m.group(2))
+            if _ok(y, mo, 1):
+                return ("%04d-%02d-01" % (y, mo), _label(y, mo, 1, False))
+
+    # 3. fall back to created_at (stable, deterministic).
+    if created_at:
+        m = re.match(r"\s*(\d{4})-(\d{2})-(\d{2})", str(created_at))
+        if m:
+            y, mo, d = int(m.group(1)), int(m.group(2)), int(m.group(3))
+            if _ok(y, mo, d):
+                return ("%04d-%02d-%02d" % (y, mo, d),
+                        _label(y, mo, d, True))
+    return ("0000-00-00", "Undated")
 
 
 def render_toc(toc, title="Contents"):
@@ -1026,6 +1150,7 @@ def page_shell(site_title, body, crumb_html, depth, with_katex=False,
 <meta name="color-scheme" content="light dark">
 <meta name="generator" content="ongo-site">
 <title>{html.escape(doc_title)}</title>
+<script>{THEME_INIT_JS}</script>
 <style>{CSS}</style>
 {katex_head}
 </head>
@@ -1038,6 +1163,8 @@ def page_shell(site_title, body, crumb_html, depth, with_katex=False,
 </div>
 <nav class="top">
 <a href="{up}index.html">Index</a>
+<button id="theme-toggle" class="theme" type="button"
+aria-label="Toggle color theme">&#9728;</button>
 </nav>
 </header>
 {crumb_html}
@@ -1048,6 +1175,7 @@ def page_shell(site_title, body, crumb_html, depth, with_katex=False,
 runtime assets. Math typeset with locally vendored KaTeX.</p>
 </footer>
 </div>
+<script>{THEME_TOGGLE_JS}</script>
 {katex_tail}
 </body>
 </html>
@@ -1097,11 +1225,6 @@ def _build_into(args, out_dir, work_dir):
 
     conn = db_connect(db_path)
 
-    # topic id -> {title, key}
-    topics = {}
-    for t in ken_list(ken, db_path, "topic"):
-        topics[t["id"]] = t
-
     # Resolve every marker to a published item.
     items = {}  # source_pub_id -> item dict
     for m in markers:
@@ -1138,36 +1261,41 @@ def _build_into(args, out_dir, work_dir):
             continue
 
         display = nav_title or (pub["title"] or "Untitled")[:120]
-        section_override = fetch_notes_body(conn, m["id"]).strip() or None
         slug = slugify(display, pub["id"][:8])
+        # Derive a deterministic date from key / title / created_at.
+        # `created_at` may be absent from a Row when keyed differently;
+        # access defensively.
+        try:
+            created_at = pub["created_at"]
+        except (IndexError, KeyError):
+            created_at = None
+        date_key, date_label = derive_item_date(
+            pub["key"] or "", display, created_at
+        )
         items[pub["id"]] = {
             "pub_id": pub["id"],
             "display": display,
             "slug": slug,
             "source": source,
-            "section_override": section_override,
+            "date_key": date_key,
+            "date_label": date_label,
             "page_path": f"items/{slug}.html",
         }
 
     if not items:
         log.append("  no resolvable published items — site will be empty")
 
-    # Group items under topics via the relationship graph.
-    # topic_id -> [item, ...] ; plus an 'Unfiled' bucket.
-    grouped = {}
-    UNFILED = "__unfiled__"
-    for item in items.values():
-        if item["section_override"]:
-            grouped.setdefault(("override", item["section_override"]), []) \
-                .append(item)
-            continue
-        placed = False
-        for rkind, other in fetch_related(conn, item["pub_id"]):
-            if other in topics:
-                grouped.setdefault(("topic", other), []).append(item)
-                placed = True
-        if not placed:
-            grouped.setdefault(("unfiled", UNFILED), []).append(item)
+    # Single global reverse-chronological order (newest date first); ties
+    # within the same date broken alphabetically by title (A->Z). This ONE
+    # ordering drives both the flat index and the inter-article prev/next
+    # pager. `_invert_date` maps the ISO date to a string that sorts in
+    # DESCENDING chronological order, so a single ascending sort gives
+    # newest-first dates while the forward (lowercased) title keeps ties
+    # A->Z. Deterministic and stable across runs.
+    global_order = sorted(
+        items.values(),
+        key=lambda x: (_invert_date(x["date_key"]), x["display"].lower()),
+    )
 
     # Build a published-set lookup for cross-link resolution.
     published_ids = set(items.keys())
@@ -1209,9 +1337,10 @@ def _build_into(args, out_dir, work_dir):
     # katex_ok is False and pages degrade to raw `$...$` (logged, no crash).
     katex_ok = vendor_katex(work_dir, log)
 
-    # Per-item pages. Build an ordered list first so each page can carry
-    # prev/next inter-article navigation (deterministic: slug order).
-    ordered = sorted(items.values(), key=lambda x: x["slug"])
+    # Per-item pages. prev/next follows the SAME global reverse-chron
+    # order as the index (newest first, alpha tie-break), so "Previous"
+    # is the newer neighbour and "Next" the older one.
+    ordered = global_order
     for pos, item in enumerate(ordered):
         src = item["source"]
         crumb = (
@@ -1310,38 +1439,10 @@ def _build_into(args, out_dir, work_dir):
         ) as fh:
             fh.write(page)
 
-    # Index page: topic sections are the PRIMARY structure. ongo has no
-    # freeform tags; kendb `topic` publications + related-to/cites/
-    # derives-from edges (and section overrides) ARE the tags. Items with
-    # no topic land in a clearly-labelled "Other / Ungrouped" section.
-    OTHER_HEADING = "Other / Ungrouped"
-    sections = []  # (heading, is_other, [items])
-    for (kind, gid), gitems in grouped.items():
-        if kind == "topic":
-            heading = topics[gid]["title"] or topics[gid].get("key") or gid
-            sections.append((heading, False, gitems))
-        elif kind == "override":
-            sections.append((gid, False, gitems))
-        else:
-            sections.append((OTHER_HEADING, True, gitems))
-
-    # Deterministic: real topics A->Z, the Other bucket always last.
-    sections.sort(key=lambda s: (s[1], s[0].lower()))
-
-    # Assign a stable anchor id per section for the Contents nav.
-    seen_sec = {}
-    nav_entries = []  # (level, anchor_id, text) for render_toc
-    for idx, (heading, is_other, gitems) in enumerate(sections):
-        base = slugify(heading, "section-%d" % idx) or "section-%d" % idx
-        if base in seen_sec:
-            seen_sec[base] += 1
-            sec_id = "%s-%d" % (base, seen_sec[base])
-        else:
-            seen_sec[base] = 0
-            sec_id = base
-        sections[idx] = (heading, is_other, gitems, sec_id)
-        nav_entries.append((2, sec_id, "%s (%d)" % (heading, len(gitems))))
-
+    # Index page: a SINGLE GLOBAL FLAT LIST of every published item.
+    # No topic grouping, no per-topic nav. Rows are in `global_order`
+    # (reverse-chronological, newest first; ties A->Z by title) and each
+    # row shows the item's derived date.
     total_items = len(items)
     index_body = [
         '<p class="lede">Research notes</p>',
@@ -1355,42 +1456,21 @@ def _build_into(args, out_dir, work_dir):
         )
     else:
         index_body.append(
-            '<p class="intro">%d published note%s across %d '
-            "section%s, grouped by topic.</p>"
-            % (
-                total_items,
-                "" if total_items == 1 else "s",
-                len(sections),
-                "" if len(sections) == 1 else "s",
-            )
+            '<p class="intro">%d published note%s, newest first.</p>'
+            % (total_items, "" if total_items == 1 else "s")
         )
-        # Top "Contents" nav: one in-page link per topic section.
-        index_body.append(render_toc(nav_entries, "Contents"))
-    for heading, is_other, gitems, sec_id in sections:
-        cls = "topic other" if is_other else "topic"
-        index_body.append('<section class="%s">' % cls)
-        index_body.append(
-            '<h2 id="%s"><a class="shead" href="#%s">%s</a>'
-            '<span class="count">%d note%s</span></h2>'
-            % (
-                html.escape(sec_id, quote=True),
-                html.escape(sec_id, quote=True),
-                html.escape(heading),
-                len(gitems),
-                "" if len(gitems) == 1 else "s",
-            )
-        )
-        index_body.append("<ul>")
-        for item in sorted(gitems, key=lambda x: x["display"].lower()):
+        index_body.append('<ul class="index">')
+        for item in global_order:
             index_body.append(
-                '<li><a href="%s">%s</a></li>'
+                '<li><a href="%s"><span class="ititle">%s</span>'
+                '<span class="idate">%s</span></a></li>'
                 % (
                     html.escape(item["page_path"]),
                     html.escape(item["display"]),
+                    html.escape(item["date_label"]),
                 )
             )
         index_body.append("</ul>")
-        index_body.append("</section>")
 
     with open(
         os.path.join(work_dir, "index.html"), "w", encoding="utf-8"
@@ -1412,7 +1492,7 @@ def _build_into(args, out_dir, work_dir):
 
     # Build log (also written into the site dir for auditability).
     log.append(f"published items: {len(items)}")
-    log.append(f"sections: {len(sections)}")
+    log.append("index: single global reverse-chron flat list")
     log.append(f"katex: {'vendored' if katex_ok else 'unavailable (raw)'}")
     log_text = "\n".join(log) + "\n"
     with open(
