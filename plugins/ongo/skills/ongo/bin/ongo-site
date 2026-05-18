@@ -505,6 +505,23 @@ paint();});
 """
 
 
+# Random-article button. Reads the build-time-emitted global
+# window.__ONGO_ITEMS__ (an array of relative item-page URLs, correct
+# depth for the current page) and on click navigates to a uniformly
+# random entry. Pure client-side randomness; build stays deterministic.
+RANDOM_JS = """\
+(function(){
+var b=document.getElementById("rand-article");if(!b)return;
+var L=window.__ONGO_ITEMS__;
+if(!L||!L.length){b.disabled=true;return;}
+b.addEventListener("click",function(){
+var i=Math.floor(Math.random()*L.length);
+if(i>=L.length)i=L.length-1;
+window.location.href=L[i];});
+})();
+"""
+
+
 # --------------------------------------------------------------------------- #
 # math extraction ($...$, $$...$$, \(...\), \[...\])
 # --------------------------------------------------------------------------- #
@@ -995,14 +1012,15 @@ header.site nav.top{display:flex;align-items:center;gap:1rem}
 header.site nav.top a{color:var(--muted);font-size:.85rem;
 font-weight:500}
 header.site nav.top a:hover{color:var(--accent)}
-button.theme{font-family:var(--sans);cursor:pointer;color:var(--muted);
-background:var(--surface);border:1px solid var(--border);
+button.theme,button.rand{font-family:var(--sans);cursor:pointer;
+color:var(--muted);background:var(--surface);border:1px solid var(--border);
 border-radius:999px;width:2rem;height:2rem;font-size:.95rem;line-height:1;
 padding:0;display:inline-flex;align-items:center;justify-content:center;
 transition:color .12s ease,border-color .12s ease}
-button.theme:hover{color:var(--accent);border-color:var(--accent)}
-button.theme:focus-visible{outline:2px solid var(--accent);
-outline-offset:2px}
+button.theme:hover,button.rand:hover{color:var(--accent);
+border-color:var(--accent)}
+button.theme:focus-visible,button.rand:focus-visible{
+outline:2px solid var(--accent);outline-offset:2px}
 
 ul.index{list-style:none;padding:0;margin:1.4rem 0 0;
 border-top:1px solid var(--border-soft)}
@@ -1249,8 +1267,18 @@ def render_toc(toc, title="Contents"):
 
 
 def page_shell(site_title, body, crumb_html, depth, with_katex=False,
-               page_title=None):
+               page_title=None, item_paths=None):
     up = "../" * depth
+    # Build-time-emitted list of every published item page URL, made
+    # relative to THIS page (depth-correct prefix). Order is whatever the
+    # caller passes (global_order — deterministic), so the emitted array is
+    # byte-stable across runs; the random pick happens client-side at click
+    # time. json.dumps gives a safe, properly-escaped JS array literal.
+    rel_items = [up + p for p in (item_paths or [])]
+    items_json = json.dumps(rel_items, separators=(",", ":"), sort_keys=False)
+    rand_init = (
+        '<script>window.__ONGO_ITEMS__=%s;</script>' % items_json
+    )
     katex_head = ""
     katex_tail = ""
     if with_katex:
@@ -1274,6 +1302,7 @@ def page_shell(site_title, body, crumb_html, depth, with_katex=False,
 <meta name="generator" content="ongo-site">
 <title>{html.escape(doc_title)}</title>
 <script>{THEME_INIT_JS}</script>
+{rand_init}
 <style>{CSS}</style>
 {katex_head}
 </head>
@@ -1286,6 +1315,8 @@ def page_shell(site_title, body, crumb_html, depth, with_katex=False,
 </div>
 <nav class="top">
 <a href="{up}index.html">Index</a>
+<button id="rand-article" class="rand" type="button"
+aria-label="Go to a random article">&#127922;</button>
 <button id="theme-toggle" class="theme" type="button"
 aria-label="Toggle color theme">&#9728;</button>
 </nav>
@@ -1299,6 +1330,7 @@ runtime assets. Math typeset with locally vendored KaTeX.</p>
 </footer>
 </div>
 <script>{THEME_TOGGLE_JS}</script>
+<script>{RANDOM_JS}</script>
 {katex_tail}
 </body>
 </html>
@@ -1592,6 +1624,10 @@ def _build_into(args, out_dir, work_dir):
     # order as the index (newest first, alpha tie-break), so "Previous"
     # is the newer neighbour and "Next" the older one.
     ordered = global_order
+    # One deterministic list of every published item page (build-time
+    # order = global_order); page_shell rewrites these to the right
+    # relative depth and the random button picks one client-side.
+    item_paths = [it["page_path"] for it in global_order]
     for pos, item in enumerate(ordered):
         src = item["source"]
         crumb = (
@@ -1682,6 +1718,7 @@ def _build_into(args, out_dir, work_dir):
             args.site_title, body, crumb, depth=1,
             with_katex=(katex_ok and page_uses_katex),
             page_title=item["display"],
+            item_paths=item_paths,
         )
         with open(
             os.path.join(work_dir, item["page_path"]),
@@ -1728,7 +1765,8 @@ def _build_into(args, out_dir, work_dir):
     ) as fh:
         fh.write(
             page_shell(
-                args.site_title, "\n".join(index_body), "", depth=0
+                args.site_title, "\n".join(index_body), "", depth=0,
+                item_paths=item_paths,
             )
         )
 
