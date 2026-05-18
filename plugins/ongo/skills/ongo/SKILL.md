@@ -1,6 +1,6 @@
 ---
 name: ongo
-version: 0.3.5
+version: 0.3.6
 description: >-
   Autonomous research agent. Polls Slack for research requests, tracks findings
   in kendb, expands research when idle, and self-improves on a 24-hour cycle.

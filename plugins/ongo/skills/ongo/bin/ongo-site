@@ -569,6 +569,84 @@ _BOLD = re.compile(r"\*\*([^*]+)\*\*")
 _ITALIC = re.compile(r"(?<!\*)\*(?!\*)([^*]+)\*(?!\*)")
 _LINK = re.compile(r"\[([^\]]+)\]\(([^)\s]+)\)")
 _HTML_TAG_LINE = re.compile(r"^\s*<(/?)([a-zA-Z][\w-]*)")
+
+# A whole Markdown link span `[ ... ]( ... )` that may be soft-wrapped: the
+# `[text]` and/or the `(url)` can straddle newlines or a list-item boundary.
+# `[^\[\]]` (no nested brackets) keeps it from running away across the doc;
+# DOTALL lets the inner text and url contain the wrapping newlines. The url
+# part forbids whitespace AFTER collapsing (caught in the substitution).
+_WRAPPED_LINK = re.compile(
+    r"\[([^\[\]]+?)\]\s*\(\s*([^()\s][^()]*?)\s*\)", re.DOTALL
+)
+
+
+def _join_wrapped_links(md):
+    """Collapse internal whitespace/newlines inside Markdown link spans.
+
+    A `[text](url)` whose `text` (or the whole token) is soft-wrapped across
+    lines — or across a list-item boundary — would otherwise never reach the
+    inline renderer intact: the line-based block parser splits the `[` into
+    bare list/paragraph text and the `](url)` leaks as literal text into a
+    later block. Run this on the RAW markdown (before block parsing): for
+    every bracket-paren link span, replace runs of internal whitespace
+    (incl. newlines) in the link *text* with single spaces and strip
+    whitespace from the *url*, so `[ ... \\n ... ]( ... )` becomes a
+    single-line `[...](...)` the normal `_LINK` pass recognizes. Real
+    Markdown links on one line are unaffected (no internal newline to
+    collapse). Code fences are protected so `[x](y)` inside a code block
+    is left byte-for-byte intact.
+    """
+    # Protect fenced code blocks: never rewrite link-looking text in code.
+    fences = {}
+
+    def _stash_fence(m):
+        tok = "\x00FENCE%d\x00" % len(fences)
+        fences[tok] = m.group(0)
+        return tok
+
+    protected = re.sub(
+        r"(^|\n)([ \t]*)(```|~~~)[^\n]*\n.*?(?:\n[ \t]*\3[^\n]*|\Z)",
+        _stash_fence,
+        md,
+        flags=re.DOTALL,
+    )
+
+    def _collapse(m):
+        label = re.sub(r"\s+", " ", m.group(1)).strip()
+        url = re.sub(r"\s+", "", m.group(2)).strip()
+        if not label or not url:
+            return m.group(0)
+        return "[%s](%s)" % (label, url)
+
+    joined = _WRAPPED_LINK.sub(_collapse, protected)
+    for tok, original in fences.items():
+        joined = joined.replace(tok, original)
+    return joined
+
+
+# Collapse an over-escaped HTML entity back to a single, valid entity:
+# `&amp;amp;` -> `&amp;`, `&amp;quot;` -> `&quot;`, `&amp;lt;` -> `&lt;`,
+# `&amp;#x27;` -> `&#x27;`, etc. Applied AFTER html.escape so a source
+# `&amp;`/`&quot;`/`&#x27;` that was escaped a second time (or a link label
+# escaped twice) is healed; a single real `&` stays `&amp;` (it has no
+# trailing entity name to fold). Idempotent: re-running changes nothing.
+_OVER_ESCAPED_ENTITY = re.compile(
+    r"&amp;(amp|lt|gt|quot|apos|#x?[0-9a-fA-F]+);"
+)
+
+
+def _unescape_double_entities(text):
+    """Fold `&amp;(amp|lt|gt|quot|#x?\\d+);` -> `&\\1;` (repeatedly).
+
+    Handles arbitrarily deep double-escaping (`&amp;amp;amp;` -> `&amp;`)
+    by iterating to a fixed point. Leaves a lone escaped `&` (`&amp;`)
+    untouched because it is not followed by another entity name.
+    """
+    prev = None
+    while prev != text:
+        prev = text
+        text = _OVER_ESCAPED_ENTITY.sub(r"&\1;", text)
+    return text
 # Bare http/https URL not already inside a Markdown link target. Trailing
 # sentence punctuation is trimmed so "see https://x.org." links cleanly.
 _BARE_URL = re.compile(r"(?<![\"'(\]=])\bhttps?://[^\s<>\)\]]+")
@@ -603,14 +681,34 @@ def _render_inline(text, link_resolver):
 
     text = _INLINE_CODE.sub(_stash, text)
     text = html.escape(text)
+    # `html.escape` turns a source `&` into `&amp;`; if that `&` was the
+    # start of an entity the source ALREADY contained (`&amp;`, `&quot;`,
+    # `&#x27;`, `&lt;`, `&gt;`) it is now double-escaped (`&amp;amp;` …).
+    # Fold those back so a pre-existing valid entity passes through exactly
+    # once while a real lone `&`/`<`/`>` in prose stays escaped.
+    text = _unescape_double_entities(text)
+    # Currency escaped in the source as `\$` (so KaTeX won't treat it as
+    # math) must render as a literal `$`, not show the backslash. Math has
+    # already been pulled out to opaque tokens by extract_math(), so any
+    # `\$` remaining here is genuine escaped currency — strip the slash.
+    text = text.replace("\\$", "$")
 
     def _link_sub(m):
         label, target = m.group(1), m.group(2)
+        # `target` was captured from already-escaped text, so a `&` in a
+        # query string is now `&amp;`. `_anchor` re-escapes the href via
+        # html.escape(quote=True), which would double-escape it. Unescape
+        # the captured target once here so the single canonical escape in
+        # `_anchor` is the only one applied.
+        target = html.unescape(target)
         href, is_plain = link_resolver(target)
+        # `label` came from `text`, which is ALREADY html-escaped (and
+        # entity-folded) above. Re-escaping here is the double-escape bug
+        # (`&` -> `&amp;` -> `&amp;amp;`). Use the label as-is.
         if is_plain:
             # Unpublished target: degrade to plain text, no link, no leak.
-            return html.escape(label)
-        return _anchor(href, html.escape(label), _is_external(href))
+            return label
+        return _anchor(href, label, _is_external(href))
 
     # _LINK runs against escaped text; brackets/parens are not escaped by
     # html.escape, so the pattern still matches. Stash each Markdown link
@@ -657,7 +755,13 @@ def markdown_to_html(md, link_resolver, collect_toc=False):
     heading carries a unique id="" so a per-article table of contents can
     link to it. Otherwise returns just the html string.
     """
-    lines = md.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+    md = md.replace("\r\n", "\n").replace("\r", "\n")
+    # Join soft-wrapped `[text](url)` spans BEFORE the line-based block
+    # parser runs, so a link whose text/token straddles a newline or a
+    # list-item boundary still renders as a single `<a>` instead of leaking
+    # `](url)` into a later block.
+    md = _join_wrapped_links(md)
+    lines = md.split("\n")
     out = []
     toc = []
     seen_ids = {}
@@ -733,7 +837,20 @@ def markdown_to_html(md, link_resolver, collect_toc=False):
                 '<a class="anchor" href="#%s" aria-hidden="true">#</a>'
                 "</h%d>" % (level, hid, inner, hid, level)
             )
-            toc.append((level, hid, re.sub(r"<[^>]+>", "", inner).strip()))
+            # `inner` is already-rendered (html-escaped) HTML. Strip tags,
+            # then html.unescape so the TOC stores PLAIN text; render_toc
+            # applies the single canonical escape. Without the unescape the
+            # heading's `&quot;`/`&#x27;`/`&amp;` would be escaped a second
+            # time there (`&amp;quot;` …) — the TOC double-escape bug.
+            toc.append(
+                (
+                    level,
+                    hid,
+                    html.unescape(
+                        re.sub(r"<[^>]+>", "", inner)
+                    ).strip(),
+                )
+            )
             i += 1
             continue
 
@@ -1188,6 +1305,134 @@ runtime assets. Math typeset with locally vendored KaTeX.</p>
 """
 
 
+# --------------------------------------------------------------------------- #
+# QA self-check (post-generation defect scan)
+# --------------------------------------------------------------------------- #
+
+# An unrendered Markdown link left as literal text: a `[...]` immediately
+# followed by `(...)` that was NOT turned into an <a> (a real anchor never
+# leaves the literal `](` sequence in the output).
+_UNRENDERED_LINK = re.compile(r"\[[^\]\n]{0,300}\]\([^)\n]{1,400}\)")
+# A raw Markdown block line that leaked verbatim into the HTML body: a line
+# that still starts with `#` (ATX heading) or `**` (bold) unprocessed. Only
+# flagged outside <pre>/<code>, checked on the raw file with a coarse rule.
+_RAW_MD_LINE = re.compile(r"(?m)^(#{1,6}\s+\S|\*\*\S)")
+
+# Each QA signature: (label, test) where test(text) -> count of offences.
+def _qa_signatures():
+    def _count_substr(s):
+        return lambda t: t.count(s)
+
+    def _count_re(rx):
+        return lambda t: len(rx.findall(t))
+
+    return [
+        ("leaked-link-target `](http`", _count_substr("](http")),
+        ("double-escaped `&amp;amp;`", _count_substr("&amp;amp;")),
+        ("double-escaped `&amp;quot;`", _count_substr("&amp;quot;")),
+        ("double-escaped `&amp;lt;`", _count_substr("&amp;lt;")),
+        ("double-escaped `&amp;gt;`", _count_substr("&amp;gt;")),
+        ("double-escaped `&amp;#`", _count_substr("&amp;#")),
+        ("literal escaped currency `\\$`", _count_substr("\\$")),
+        ("unrendered markdown link `[..](..)`",
+         _count_re(_UNRENDERED_LINK)),
+        ("raw leading `#`/`**` markdown line", _count_re(_RAW_MD_LINE)),
+    ]
+
+
+def _qa_scan_html(text):
+    """Return a list of (label, count) for every defect signature present.
+
+    Operates on the *body* of a generated page only (between <body> and
+    </body>) so vendored CSS/JS or the doctype can never trip a signature.
+    Inline <code>/<pre> spans are blanked first so a code sample that
+    legitimately shows `](http` or `\\$` is not a false positive.
+    """
+    m = re.search(r"<body[^>]*>(.*)</body>", text, re.DOTALL)
+    body = m.group(1) if m else text
+    # Blank code/pre content (keep tags so offsets/structure are sane).
+    body = re.sub(
+        r"<pre\b[^>]*>.*?</pre>", "<pre></pre>", body, flags=re.DOTALL
+    )
+    body = re.sub(
+        r"<code\b[^>]*>.*?</code>", "<code></code>", body, flags=re.DOTALL
+    )
+    hits = []
+    for label, test in _qa_signatures():
+        c = test(body)
+        if c:
+            hits.append((label, c))
+    return hits
+
+
+def run_qa(site_dir, log):
+    """Scan every produced HTML page for defect signatures.
+
+    Writes site_dir/qa-report.txt listing each offending file + per-signature
+    counts (or a clean PASS line), appends a single PASS/FAIL summary to
+    `log`, and returns (clean_pages, total_pages, total_defects). Never
+    raises and never fails the build — the report just makes regressions
+    visible.
+    """
+    pages = []
+    idx = os.path.join(site_dir, "index.html")
+    if os.path.isfile(idx):
+        pages.append(idx)
+    items_dir = os.path.join(site_dir, "items")
+    if os.path.isdir(items_dir):
+        pages.extend(
+            sorted(
+                os.path.join(items_dir, f)
+                for f in os.listdir(items_dir)
+                if f.endswith(".html")
+            )
+        )
+    report = []
+    total_defects = 0
+    offending = 0
+    for path in pages:
+        try:
+            with open(path, "r", encoding="utf-8", errors="replace") as fh:
+                text = fh.read()
+        except OSError as exc:  # pragma: no cover — defensive
+            report.append("ERROR reading %s: %s" % (path, exc))
+            continue
+        hits = _qa_scan_html(text)
+        if hits:
+            offending += 1
+            rel = os.path.relpath(path, site_dir)
+            for label, count in hits:
+                total_defects += count
+                report.append("%s : %s x%d" % (rel, label, count))
+    total = len(pages)
+    clean = total - offending
+    header = (
+        "ongo-site QA report — %d pages scanned, %d clean, %d with defects, "
+        "%d total defect hits\n" % (total, clean, offending, total_defects)
+    )
+    if offending == 0:
+        body = "PASS: no markdown-render defect signatures found.\n"
+    else:
+        body = "FAIL: defect signatures present —\n" + "\n".join(
+            report
+        ) + "\n"
+    try:
+        with open(
+            os.path.join(site_dir, "qa-report.txt"), "w", encoding="utf-8"
+        ) as fh:
+            fh.write(header + "\n" + body)
+    except OSError:  # pragma: no cover — never fail the build on report I/O
+        pass
+    summary = "QA: %s (%d/%d pages clean, %d defect hits)" % (
+        "PASS" if offending == 0 else "FAIL",
+        clean,
+        total,
+        total_defects,
+    )
+    log.append(summary)
+    return clean, total, total_defects, (offending == 0)
+
+
 def build(args):
     """Generate the site and publish it atomically.
 
@@ -1500,6 +1745,13 @@ def _build_into(args, out_dir, work_dir):
     log.append(f"published items: {len(items)}")
     log.append("index: single global reverse-chron flat list")
     log.append(f"katex: {'vendored' if katex_ok else 'unavailable (raw)'}")
+
+    # QA self-check: scan the freshly generated tree (in work_dir, so the
+    # report ships in the atomically-swapped site) for markdown-render
+    # defect signatures. Writes qa-report.txt, appends a PASS/FAIL line to
+    # the log. Never fails the build — visibility only.
+    qa_clean, qa_total, qa_defects, qa_pass = run_qa(work_dir, log)
+
     log_text = "\n".join(log) + "\n"
     with open(
         os.path.join(work_dir, "build.log"), "w", encoding="utf-8"
@@ -1526,6 +1778,18 @@ def _build_into(args, out_dir, work_dir):
         shutil.rmtree(old_dir, ignore_errors=True)
 
     sys.stdout.write(log_text)
+    # Clear, unmissable PASS/FAIL line on stdout (also in build.log via the
+    # appended QA summary). The build still succeeds either way.
+    sys.stdout.write(
+        "QA SELF-CHECK: %s — %d/%d pages clean, %d defect hits "
+        "(see qa-report.txt)\n"
+        % (
+            "PASS" if qa_pass else "FAIL",
+            qa_clean,
+            qa_total,
+            qa_defects,
+        )
+    )
     return 0
 
 
