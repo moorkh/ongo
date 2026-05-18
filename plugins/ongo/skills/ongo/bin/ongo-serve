@@ -36,11 +36,11 @@ def main(argv=None):
         )
         return 1
 
-    from http.server import HTTPServer, SimpleHTTPRequestHandler
+    from http.server import ThreadingHTTPServer, SimpleHTTPRequestHandler
     from functools import partial
 
     handler = partial(SimpleHTTPRequestHandler, directory=site_dir)
-    httpd = HTTPServer((args.host, args.port), handler)
+    httpd = ThreadingHTTPServer((args.host, args.port), handler)
     sys.stdout.write(
         f"ongo-serve: serving {site_dir} at "
         f"http://{args.host}:{args.port}/ (Ctrl-C to stop)\n"
