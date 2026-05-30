@@ -2,12 +2,12 @@
 """Unit tests for ongo-site's date-time sort ordering.
 
 Verifies:
-  * `_date_label` renders ken's canonical `YYYY-MM-DD HH:MM:SS`
-    `created_at` string as "Month D, YYYY".
-  * Missing `created_at` renders as "Undated".
   * `_invert_date` is monotone-descending across full timestamps.
   * Same-date publications are ordered by time-of-day (newest first).
   * Same-second publications fall back to title (A->Z) as a stable tiebreaker.
+  * The "0000-00-00 00:00:00" sentinel (used by the call site when
+    `created_at` is missing) inverse-sorts to the BOTTOM of the
+    newest-first list, so missing rows always appear last.
 
 The ongo-site script has no `.py` extension, so we load it as a module via
 ``importlib.util``.
@@ -50,31 +50,6 @@ class SortByDateTimeTests(unittest.TestCase):
             inv("2026-05-30 00:00:00"),
             inv("2026-05-29 23:59:59"),
         )
-
-    def test_date_label_renders_ken_timestamp(self):
-        # ken's `datetime('now')` default always produces this shape.
-        self.assertEqual(
-            self.os._date_label("2026-05-30 14:30:45"),
-            "May 30, 2026",
-        )
-
-    def test_date_label_january(self):
-        # Verify the month-name lookup at the lower bound.
-        self.assertEqual(
-            self.os._date_label("2026-01-05 00:00:00"),
-            "January 5, 2026",
-        )
-
-    def test_date_label_december(self):
-        # Verify the month-name lookup at the upper bound.
-        self.assertEqual(
-            self.os._date_label("2026-12-31 23:59:59"),
-            "December 31, 2026",
-        )
-
-    def test_date_label_missing_is_undated(self):
-        self.assertEqual(self.os._date_label(None), "Undated")
-        self.assertEqual(self.os._date_label(""), "Undated")
 
     def test_same_day_items_sort_by_time(self):
         items = [

@@ -22,7 +22,7 @@ The generator:
   3. Emits the index as a SINGLE GLOBAL FLAT LIST of every published item
      (no topic grouping, no per-topic nav): reverse-chronological (newest
      first), ties broken alphabetically by title (A->Z). Each row shows the
-     item's `created_at` rendered via `_date_label`.
+     item's `created_at` (printed verbatim).
   4. Renders each article with a per-article table of contents built from
      its Markdown headings (anchor ids + links), auto-links bare http/https
      URLs (external links get target=_blank rel=noopener), and renders
@@ -1177,12 +1177,6 @@ def slugify(text, fallback):
     return s[:80] if s else fallback
 
 
-_MONTH_NAMES = [
-    "", "January", "February", "March", "April", "May", "June",
-    "July", "August", "September", "October", "November", "December",
-]
-
-
 def _invert_date(iso):
     """Map a `YYYY-MM-DD HH:MM:SS` string to a key that sorts DESCENDING.
 
@@ -1196,25 +1190,6 @@ def _invert_date(iso):
     return "".join(
         str(9 - int(ch)) if ch.isdigit() else ch for ch in (iso or "")
     )
-
-
-def _date_label(created_at):
-    """Render ken's `created_at` as "Month D, YYYY" for the index row.
-
-    kendb stores `created_at` via SQLite's `datetime('now')` default —
-    `TEXT NOT NULL DEFAULT (datetime('now'))` — which always emits the
-    fixed-width 19-char `YYYY-MM-DD HH:MM:SS`. The same string is also
-    the sort key (lexicographic == chronological at second precision),
-    so callers use it directly; this helper only handles the display
-    side. Returns "Undated" if `created_at` is missing (e.g. a SELECT
-    that omits the column).
-    """
-    if not created_at:
-        return "Undated"
-    y = int(created_at[0:4])
-    mo = int(created_at[5:7])
-    d = int(created_at[8:10])
-    return "%s %d, %d" % (_MONTH_NAMES[mo], d, y)
 
 
 def render_toc(toc, title="Contents"):
@@ -1528,11 +1503,12 @@ def _build_into(args, out_dir, work_dir):
             created_at = pub["created_at"]
         except (IndexError, KeyError):
             created_at = None
-        # sort_ts == created_at unchanged: ken's `YYYY-MM-DD HH:MM:SS`
-        # already sorts lexicographically. The fallback string sinks
+        # sort_ts == display label == created_at unchanged: ken's
+        # `YYYY-MM-DD HH:MM:SS` already sorts lexicographically and is
+        # what we want shown in the index. The fallback string sinks
         # missing-created_at rows to the bottom of the global order.
         sort_ts = created_at or "0000-00-00 00:00:00"
-        date_label = _date_label(created_at)
+        date_label = sort_ts
         items[pub["id"]] = {
             "pub_id": pub["id"],
             "display": display,
