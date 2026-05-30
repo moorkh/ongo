@@ -1192,15 +1192,46 @@ _TITLE_DATE = re.compile(
 
 
 def _invert_date(iso):
-    """Map an ISO `YYYY-MM-DD` date to a key that sorts DESCENDING.
+    """Map an ISO `YYYY-MM-DD[ HH:MM:SS]` string to a key that sorts DESCENDING.
 
     Each digit d is replaced by (9 - d); non-digits pass through. A later
-    date thus yields a lexicographically smaller key, so a single ascending
-    sort places newer items first. Deterministic and total.
+    timestamp thus yields a lexicographically smaller key, so a single
+    ascending sort places newer items first. Works on date-only strings as
+    well as full `YYYY-MM-DD HH:MM:SS` timestamps because the digit-by-digit
+    mapping is length-agnostic; same-length strings remain mutually
+    comparable, and date-only strings always sort *after* (i.e. "older
+    than") the same date with a time suffix because the longer string with
+    inverted digits in its time fields is lexicographically smaller. To
+    keep ordering total across mixed-length inputs, callers should pad
+    date-only values to the full `YYYY-MM-DD HH:MM:SS` shape. Deterministic
+    and total.
     """
     return "".join(
         str(9 - int(ch)) if ch.isdigit() else ch for ch in (iso or "")
     )
+
+
+def derive_sort_ts(date_key, created_at):
+    """Derive a `YYYY-MM-DD HH:MM:SS` sort timestamp for an item.
+
+    Uses the time-of-day from `created_at` when its date matches the
+    item's derived `date_key` (the common case for ongo-published reports
+    — `derive_item_date` then falls through to the created_at branch, so
+    the dates necessarily agree). Otherwise the date came from the note's
+    key/title (e.g. a paper dated 2020-05-15 published today), and we
+    have no meaningful time-of-day for that historical date, so we pad
+    with "00:00:00". The padding shape keeps `_invert_date` total across
+    items.
+    """
+    base = date_key or "0000-00-00"
+    if created_at:
+        m = re.match(
+            r"\s*(\d{4}-\d{2}-\d{2})[ T](\d{2}:\d{2}:\d{2})",
+            str(created_at),
+        )
+        if m and m.group(1) == base:
+            return "%s %s" % (base, m.group(2))
+    return "%s 00:00:00" % base
 
 
 def derive_item_date(key, title, created_at):
@@ -1580,6 +1611,7 @@ def _build_into(args, out_dir, work_dir):
         date_key, date_label = derive_item_date(
             pub["key"] or "", display, created_at
         )
+        sort_ts = derive_sort_ts(date_key, created_at)
         items[pub["id"]] = {
             "pub_id": pub["id"],
             "display": display,
@@ -1587,22 +1619,25 @@ def _build_into(args, out_dir, work_dir):
             "source": source,
             "date_key": date_key,
             "date_label": date_label,
+            "sort_ts": sort_ts,
             "page_path": f"items/{slug}.html",
         }
 
     if not items:
         log.append("  no resolvable published items — site will be empty")
 
-    # Single global reverse-chronological order (newest date first); ties
-    # within the same date broken alphabetically by title (A->Z). This ONE
-    # ordering drives both the flat index and the inter-article prev/next
-    # pager. `_invert_date` maps the ISO date to a string that sorts in
+    # Single global reverse-chronological order (newest first); ordered by
+    # full `YYYY-MM-DD HH:MM:SS` timestamp so multiple items published on
+    # the same date sort by time-of-day (newest first). Ties at the same
+    # second are broken alphabetically by title (A->Z). This ONE ordering
+    # drives both the flat index and the inter-article prev/next pager.
+    # `_invert_date` maps the timestamp to a string that sorts in
     # DESCENDING chronological order, so a single ascending sort gives
-    # newest-first dates while the forward (lowercased) title keeps ties
-    # A->Z. Deterministic and stable across runs.
+    # newest-first while the forward (lowercased) title keeps same-second
+    # ties A->Z. Deterministic and stable across runs.
     global_order = sorted(
         items.values(),
-        key=lambda x: (_invert_date(x["date_key"]), x["display"].lower()),
+        key=lambda x: (_invert_date(x["sort_ts"]), x["display"].lower()),
     )
 
     # Build a published-set lookup for cross-link resolution.
