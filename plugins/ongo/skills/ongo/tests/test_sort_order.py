@@ -2,11 +2,10 @@
 """Unit tests for ongo-site's date-time sort ordering.
 
 Verifies:
+  * `derive_item_date` returns (sort_ts, label) from `created_at` alone,
+    ignoring the note's key and title.
   * Same-date publications are ordered by time-of-day (newest first).
   * Same-second publications fall back to title (A->Z) as a stable tiebreaker.
-  * Items whose date is derived from the note's *key/title* (not created_at)
-    pad to ``00:00:00`` and so always sort AFTER same-date ongo-published
-    items on the same date.
   * `_invert_date` is monotone-descending across full timestamps.
 
 The ongo-site script has no `.py` extension, so we load it as a module via
@@ -51,29 +50,52 @@ class SortByDateTimeTests(unittest.TestCase):
             inv("2026-05-29 23:59:59"),
         )
 
-    def test_derive_sort_ts_uses_time_when_dates_match(self):
-        # date_key derived from created_at -> time-of-day applies.
-        self.assertEqual(
-            self.os.derive_sort_ts("2026-05-30", "2026-05-30 14:30:00"),
-            "2026-05-30 14:30:00",
+    def test_derive_item_date_from_full_timestamp(self):
+        # Full `YYYY-MM-DD HH:MM:SS` created_at -> sort_ts keeps the time.
+        sort_ts, label = self.os.derive_item_date(
+            "any-key", "any title", "2026-05-30 14:30:45"
         )
+        self.assertEqual(sort_ts, "2026-05-30 14:30:45")
+        self.assertEqual(label, "May 30, 2026")
 
-    def test_derive_sort_ts_pads_when_dates_disagree(self):
-        # date_key from note key (e.g. paper from 2020) — created_at time is
-        # NOT a meaningful time-of-day for that historical date.
-        self.assertEqual(
-            self.os.derive_sort_ts("2020-05-15", "2026-05-30 14:30:00"),
-            "2020-05-15 00:00:00",
+    def test_derive_item_date_accepts_iso_t_separator(self):
+        sort_ts, label = self.os.derive_item_date(
+            "k", "t", "2026-05-30T09:15:00"
         )
+        self.assertEqual(sort_ts, "2026-05-30 09:15:00")
+        self.assertEqual(label, "May 30, 2026")
 
-    def test_derive_sort_ts_no_created_at(self):
-        self.assertEqual(
-            self.os.derive_sort_ts("2026-05-30", None),
-            "2026-05-30 00:00:00",
+    def test_derive_item_date_date_only_pads_zero_time(self):
+        sort_ts, label = self.os.derive_item_date(
+            "k", "t", "2026-05-30"
         )
+        self.assertEqual(sort_ts, "2026-05-30 00:00:00")
+        self.assertEqual(label, "May 30, 2026")
+
+    def test_derive_item_date_ignores_key_and_title(self):
+        # Even if the note's KEY encodes 2015 (a historical paper) and the
+        # title mentions "May 2020", we order purely by created_at.
+        sort_ts, label = self.os.derive_item_date(
+            "hinton-2015-distillation",
+            "Distilling the Knowledge in a Neural Network (May 2020 review)",
+            "2026-05-30 10:00:00",
+        )
+        self.assertEqual(sort_ts, "2026-05-30 10:00:00")
+        self.assertEqual(label, "May 30, 2026")
+
+    def test_derive_item_date_missing_created_at_fallback(self):
+        sort_ts, label = self.os.derive_item_date("k", "t", None)
+        self.assertEqual(sort_ts, "0000-00-00 00:00:00")
+        self.assertEqual(label, "Undated")
+
+    def test_derive_item_date_unparseable_created_at_fallback(self):
+        sort_ts, label = self.os.derive_item_date(
+            "k", "t", "not-a-timestamp"
+        )
+        self.assertEqual(sort_ts, "0000-00-00 00:00:00")
+        self.assertEqual(label, "Undated")
 
     def test_same_day_items_sort_by_time(self):
-        # Three items on the same day, very different times.
         items = [
             {"display": "alpha", "sort_ts": "2026-05-30 09:00:00"},
             {"display": "beta",  "sort_ts": "2026-05-30 14:30:00"},
@@ -86,7 +108,6 @@ class SortByDateTimeTests(unittest.TestCase):
                 x["display"].lower(),
             ),
         )
-        # Newest time first.
         self.assertEqual(
             [i["display"] for i in ordered],
             ["beta", "alpha", "gamma"],
@@ -129,31 +150,6 @@ class SortByDateTimeTests(unittest.TestCase):
         self.assertEqual(
             [i["display"] for i in ordered],
             ["today-late", "today-early", "yesterday-late"],
-        )
-
-    def test_date_only_items_sort_after_timestamped_same_date(self):
-        # Item whose date came from key/title (padded 00:00:00) should sort
-        # AFTER same-date ongo-published items that have a real time-of-day.
-        items = [
-            {"display": "ongo-published-mid",
-             "sort_ts": "2026-05-30 12:00:00"},
-            {"display": "ongo-published-early",
-             "sort_ts": "2026-05-30 06:00:00"},
-            {"display": "historical-paper",
-             "sort_ts": "2026-05-30 00:00:00"},
-        ]
-        ordered = sorted(
-            items,
-            key=lambda x: (
-                self.os._invert_date(x["sort_ts"]),
-                x["display"].lower(),
-            ),
-        )
-        self.assertEqual(
-            [i["display"] for i in ordered],
-            ["ongo-published-mid",
-             "ongo-published-early",
-             "historical-paper"],
         )
 
 

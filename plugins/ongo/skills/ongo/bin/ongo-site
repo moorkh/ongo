@@ -1211,90 +1211,46 @@ def _invert_date(iso):
     )
 
 
-def derive_sort_ts(date_key, created_at):
-    """Derive a `YYYY-MM-DD HH:MM:SS` sort timestamp for an item.
-
-    Uses the time-of-day from `created_at` when its date matches the
-    item's derived `date_key` (the common case for ongo-published reports
-    — `derive_item_date` then falls through to the created_at branch, so
-    the dates necessarily agree). Otherwise the date came from the note's
-    key/title (e.g. a paper dated 2020-05-15 published today), and we
-    have no meaningful time-of-day for that historical date, so we pad
-    with "00:00:00". The padding shape keeps `_invert_date` total across
-    items.
-    """
-    base = date_key or "0000-00-00"
-    if created_at:
-        m = re.match(
-            r"\s*(\d{4}-\d{2}-\d{2})[ T](\d{2}:\d{2}:\d{2})",
-            str(created_at),
-        )
-        if m and m.group(1) == base:
-            return "%s %s" % (base, m.group(2))
-    return "%s 00:00:00" % base
-
-
 def derive_item_date(key, title, created_at):
-    """Derive a (sort_key, label) pair for an item's date.
+    """Derive a (sort_ts, label) pair for an item from `created_at` only.
 
-    Date rule (documented & deterministic), in priority order:
-      1. The target note's `key` if it encodes a date: a `YYYYMMDD` or
-         `YYYY-MM-DD` / `YYYY_MM_DD` run anywhere in the key (the day is
-         optional; missing day -> the 1st). Validated as a real date.
-      2. Else a Month-Year in the title (e.g. "May 2026", "Apr. 2026");
-         day defaults to the 1st.
-      3. Else fall back to the publication's `created_at` timestamp
-         (its leading `YYYY-MM-DD`), or "0000-00-00" if even that is
-         absent. This is stable across runs (created_at never changes),
-         so ordering stays deterministic.
+    Order PURELY by the publication's `created_at` timestamp (full
+    `YYYY-MM-DD HH:MM:SS`) — the actual moment the item was added to
+    kendb. We no longer try to extract a date from the note's key or
+    title: those derivations were arbitrary for synthesis surveys that
+    cover many papers (whose "date" should they get?), so we just use
+    the timestamp that is always present, stable, and unambiguous.
 
-    sort_key is an ISO `YYYY-MM-DD` string (lexicographic == chronological);
-    label is a human "Mon YYYY" / "Mon D, YYYY" string for the index row.
+    sort_ts is a full `YYYY-MM-DD HH:MM:SS` string (lexicographic ==
+    chronological, with second precision); label is a human
+    "Mon D, YYYY" string for the index row. Falls back to
+    ("0000-00-00 00:00:00", "Undated") if `created_at` is missing or
+    unparseable, so ordering remains total and deterministic.
     """
     def _ok(y, mo, d):
         return 1900 <= y <= 2999 and 1 <= mo <= 12 and 1 <= d <= 31
 
-    def _label(y, mo, d, with_day):
+    def _label(y, mo, d):
         name = [k for k, v in _MONTHS.items() if v == mo][0].capitalize()
-        return ("%s %d, %d" % (name, d, y)) if with_day \
-            else ("%s %d" % (name, y))
+        return "%s %d, %d" % (name, d, y)
 
-    # Every item gets a PRECISE (day-level) date. Priority:
-    # 1. a full YYYY-MM-DD encoded in the key (has explicit day).
-    if key:
-        m = _KEY_DATE.search(key)
-        if m and m.group(3) is not None:
+    if created_at:
+        m = re.match(
+            r"\s*(\d{4})-(\d{2})-(\d{2})[ T](\d{2}:\d{2}:\d{2})",
+            str(created_at),
+        )
+        if m:
             y, mo, d = int(m.group(1)), int(m.group(2)), int(m.group(3))
             if _ok(y, mo, d):
-                return ("%04d-%02d-%02d" % (y, mo, d),
-                        _label(y, mo, d, True))
-
-    # 2. the publication's created_at (always present, exact to the day,
-    #    stable across runs -> precise + deterministic).
-    if created_at:
+                return ("%04d-%02d-%02d %s" % (y, mo, d, m.group(4)),
+                        _label(y, mo, d))
         m = re.match(r"\s*(\d{4})-(\d{2})-(\d{2})", str(created_at))
         if m:
             y, mo, d = int(m.group(1)), int(m.group(2)), int(m.group(3))
             if _ok(y, mo, d):
-                return ("%04d-%02d-%02d" % (y, mo, d),
-                        _label(y, mo, d, True))
-
-    # 3. last resort only if created_at is somehow absent: month from
-    #    key or title (day -> 1st), still rendered with a day.
-    if key:
-        m = _KEY_DATE.search(key)
-        if m:
-            y, mo = int(m.group(1)), int(m.group(2))
-            if _ok(y, mo, 1):
-                return ("%04d-%02d-01" % (y, mo), _label(y, mo, 1, True))
-    if title:
-        m = _TITLE_DATE.search(title)
-        if m:
-            mo = _MONTHS[m.group(1).lower()[:3]]
-            y = int(m.group(2))
-            if _ok(y, mo, 1):
-                return ("%04d-%02d-01" % (y, mo), _label(y, mo, 1, True))
-    return ("0000-00-00", "Undated")
+                return ("%04d-%02d-%02d 00:00:00" % (y, mo, d),
+                        _label(y, mo, d))
+    return ("0000-00-00 00:00:00", "Undated")
 
 
 def render_toc(toc, title="Contents"):
@@ -1608,16 +1564,14 @@ def _build_into(args, out_dir, work_dir):
             created_at = pub["created_at"]
         except (IndexError, KeyError):
             created_at = None
-        date_key, date_label = derive_item_date(
+        sort_ts, date_label = derive_item_date(
             pub["key"] or "", display, created_at
         )
-        sort_ts = derive_sort_ts(date_key, created_at)
         items[pub["id"]] = {
             "pub_id": pub["id"],
             "display": display,
             "slug": slug,
             "source": source,
-            "date_key": date_key,
             "date_label": date_label,
             "sort_ts": sort_ts,
             "page_path": f"items/{slug}.html",
