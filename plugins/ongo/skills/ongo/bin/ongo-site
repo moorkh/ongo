@@ -1177,80 +1177,47 @@ def slugify(text, fallback):
     return s[:80] if s else fallback
 
 
-_MONTHS = {
-    "jan": 1, "feb": 2, "mar": 3, "apr": 4, "may": 5, "jun": 6,
-    "jul": 7, "aug": 8, "sep": 9, "oct": 10, "nov": 11, "dec": 12,
-}
-# YYYYMMDD or YYYY-MM-DD / YYYY_MM_DD anywhere in the key (e.g.
-# `note-20260517-foo`, `2026-05-17-clacks`). Day is optional.
-_KEY_DATE = re.compile(r"(\d{4})[-_]?(\d{2})[-_]?(\d{2})?")
-# "May 2026", "Apr. 2026", "September 2026" in a title.
-_TITLE_DATE = re.compile(
-    r"\b(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.?\s+(\d{4})",
-    re.I,
-)
+_MONTH_NAMES = [
+    "", "January", "February", "March", "April", "May", "June",
+    "July", "August", "September", "October", "November", "December",
+]
 
 
 def _invert_date(iso):
-    """Map an ISO `YYYY-MM-DD[ HH:MM:SS]` string to a key that sorts DESCENDING.
+    """Map a `YYYY-MM-DD HH:MM:SS` string to a key that sorts DESCENDING.
 
     Each digit d is replaced by (9 - d); non-digits pass through. A later
     timestamp thus yields a lexicographically smaller key, so a single
-    ascending sort places newer items first. Works on date-only strings as
-    well as full `YYYY-MM-DD HH:MM:SS` timestamps because the digit-by-digit
-    mapping is length-agnostic; same-length strings remain mutually
-    comparable, and date-only strings always sort *after* (i.e. "older
-    than") the same date with a time suffix because the longer string with
-    inverted digits in its time fields is lexicographically smaller. To
-    keep ordering total across mixed-length inputs, callers should pad
-    date-only values to the full `YYYY-MM-DD HH:MM:SS` shape. Deterministic
-    and total.
+    ascending sort places newer items first. Inputs are the 19-char
+    `YYYY-MM-DD HH:MM:SS` shape that `derive_item_date` produces, so the
+    mapping is length-uniform and ordering is total.
     """
     return "".join(
         str(9 - int(ch)) if ch.isdigit() else ch for ch in (iso or "")
     )
 
 
-def derive_item_date(key, title, created_at):
-    """Derive a (sort_ts, label) pair for an item from `created_at` only.
+def derive_item_date(created_at):
+    """Derive a (sort_ts, label) pair from ken's `created_at`.
 
-    Order PURELY by the publication's `created_at` timestamp (full
-    `YYYY-MM-DD HH:MM:SS`) — the actual moment the item was added to
-    kendb. We no longer try to extract a date from the note's key or
-    title: those derivations were arbitrary for synthesis surveys that
-    cover many papers (whose "date" should they get?), so we just use
-    the timestamp that is always present, stable, and unambiguous.
+    kendb stores `created_at` via SQLite's `datetime('now')` default —
+    the column is `TEXT NOT NULL DEFAULT (datetime('now'))`, which
+    always emits the fixed-width 19-char `YYYY-MM-DD HH:MM:SS`. That is
+    the single authoritative date source: we parse only that shape and
+    do not synthesise a date from the note's key or title.
 
-    sort_ts is a full `YYYY-MM-DD HH:MM:SS` string (lexicographic ==
-    chronological, with second precision); label is a human
-    "Mon D, YYYY" string for the index row. Falls back to
-    ("0000-00-00 00:00:00", "Undated") if `created_at` is missing or
-    unparseable, so ordering remains total and deterministic.
+    sort_ts is the `created_at` string verbatim (lexicographic ==
+    chronological, second precision); label is a human "Month D, YYYY"
+    for the index row. Returns ("0000-00-00 00:00:00", "Undated") only
+    if `created_at` is missing (e.g. a SELECT that omits the column),
+    so ordering stays total.
     """
-    def _ok(y, mo, d):
-        return 1900 <= y <= 2999 and 1 <= mo <= 12 and 1 <= d <= 31
-
-    def _label(y, mo, d):
-        name = [k for k, v in _MONTHS.items() if v == mo][0].capitalize()
-        return "%s %d, %d" % (name, d, y)
-
-    if created_at:
-        m = re.match(
-            r"\s*(\d{4})-(\d{2})-(\d{2})[ T](\d{2}:\d{2}:\d{2})",
-            str(created_at),
-        )
-        if m:
-            y, mo, d = int(m.group(1)), int(m.group(2)), int(m.group(3))
-            if _ok(y, mo, d):
-                return ("%04d-%02d-%02d %s" % (y, mo, d, m.group(4)),
-                        _label(y, mo, d))
-        m = re.match(r"\s*(\d{4})-(\d{2})-(\d{2})", str(created_at))
-        if m:
-            y, mo, d = int(m.group(1)), int(m.group(2)), int(m.group(3))
-            if _ok(y, mo, d):
-                return ("%04d-%02d-%02d 00:00:00" % (y, mo, d),
-                        _label(y, mo, d))
-    return ("0000-00-00 00:00:00", "Undated")
+    if not created_at:
+        return ("0000-00-00 00:00:00", "Undated")
+    y = int(created_at[0:4])
+    mo = int(created_at[5:7])
+    d = int(created_at[8:10])
+    return (created_at, "%s %d, %d" % (_MONTH_NAMES[mo], d, y))
 
 
 def render_toc(toc, title="Contents"):
@@ -1557,16 +1524,14 @@ def _build_into(args, out_dir, work_dir):
 
         display = nav_title or (pub["title"] or "Untitled")[:120]
         slug = slugify(display, pub["id"][:8])
-        # Derive a deterministic date from key / title / created_at.
-        # `created_at` may be absent from a Row when keyed differently;
-        # access defensively.
+        # Derive a deterministic date from `created_at`. The column
+        # may be absent from a Row when keyed differently; access
+        # defensively.
         try:
             created_at = pub["created_at"]
         except (IndexError, KeyError):
             created_at = None
-        sort_ts, date_label = derive_item_date(
-            pub["key"] or "", display, created_at
-        )
+        sort_ts, date_label = derive_item_date(created_at)
         items[pub["id"]] = {
             "pub_id": pub["id"],
             "display": display,

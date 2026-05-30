@@ -2,8 +2,9 @@
 """Unit tests for ongo-site's date-time sort ordering.
 
 Verifies:
-  * `derive_item_date` returns (sort_ts, label) from `created_at` alone,
-    ignoring the note's key and title.
+  * `derive_item_date` parses ken's canonical `YYYY-MM-DD HH:MM:SS`
+    `created_at` string into a (sort_ts, label) pair.
+  * Missing `created_at` falls back to the "Undated" sentinel.
   * Same-date publications are ordered by time-of-day (newest first).
   * Same-second publications fall back to title (A->Z) as a stable tiebreaker.
   * `_invert_date` is monotone-descending across full timestamps.
@@ -50,48 +51,29 @@ class SortByDateTimeTests(unittest.TestCase):
             inv("2026-05-29 23:59:59"),
         )
 
-    def test_derive_item_date_from_full_timestamp(self):
-        # Full `YYYY-MM-DD HH:MM:SS` created_at -> sort_ts keeps the time.
-        sort_ts, label = self.os.derive_item_date(
-            "any-key", "any title", "2026-05-30 14:30:45"
-        )
+    def test_derive_item_date_from_ken_timestamp(self):
+        # ken's `datetime('now')` default always produces this shape.
+        sort_ts, label = self.os.derive_item_date("2026-05-30 14:30:45")
         self.assertEqual(sort_ts, "2026-05-30 14:30:45")
         self.assertEqual(label, "May 30, 2026")
 
-    def test_derive_item_date_accepts_iso_t_separator(self):
-        sort_ts, label = self.os.derive_item_date(
-            "k", "t", "2026-05-30T09:15:00"
-        )
-        self.assertEqual(sort_ts, "2026-05-30 09:15:00")
-        self.assertEqual(label, "May 30, 2026")
+    def test_derive_item_date_january(self):
+        # Verify the month-name lookup at the lower bound.
+        _, label = self.os.derive_item_date("2026-01-05 00:00:00")
+        self.assertEqual(label, "January 5, 2026")
 
-    def test_derive_item_date_date_only_pads_zero_time(self):
-        sort_ts, label = self.os.derive_item_date(
-            "k", "t", "2026-05-30"
-        )
-        self.assertEqual(sort_ts, "2026-05-30 00:00:00")
-        self.assertEqual(label, "May 30, 2026")
+    def test_derive_item_date_december(self):
+        # Verify the month-name lookup at the upper bound.
+        _, label = self.os.derive_item_date("2026-12-31 23:59:59")
+        self.assertEqual(label, "December 31, 2026")
 
-    def test_derive_item_date_ignores_key_and_title(self):
-        # Even if the note's KEY encodes 2015 (a historical paper) and the
-        # title mentions "May 2020", we order purely by created_at.
-        sort_ts, label = self.os.derive_item_date(
-            "hinton-2015-distillation",
-            "Distilling the Knowledge in a Neural Network (May 2020 review)",
-            "2026-05-30 10:00:00",
-        )
-        self.assertEqual(sort_ts, "2026-05-30 10:00:00")
-        self.assertEqual(label, "May 30, 2026")
-
-    def test_derive_item_date_missing_created_at_fallback(self):
-        sort_ts, label = self.os.derive_item_date("k", "t", None)
+    def test_derive_item_date_missing_falls_back_to_undated(self):
+        sort_ts, label = self.os.derive_item_date(None)
         self.assertEqual(sort_ts, "0000-00-00 00:00:00")
         self.assertEqual(label, "Undated")
 
-    def test_derive_item_date_unparseable_created_at_fallback(self):
-        sort_ts, label = self.os.derive_item_date(
-            "k", "t", "not-a-timestamp"
-        )
+    def test_derive_item_date_empty_falls_back_to_undated(self):
+        sort_ts, label = self.os.derive_item_date("")
         self.assertEqual(sort_ts, "0000-00-00 00:00:00")
         self.assertEqual(label, "Undated")
 
