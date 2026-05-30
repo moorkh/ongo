@@ -2,12 +2,12 @@
 """Unit tests for ongo-site's date-time sort ordering.
 
 Verifies:
-  * `derive_item_date` parses ken's canonical `YYYY-MM-DD HH:MM:SS`
-    `created_at` string into a (sort_ts, label) pair.
-  * Missing `created_at` falls back to the "Undated" sentinel.
+  * `_date_label` renders ken's canonical `YYYY-MM-DD HH:MM:SS`
+    `created_at` string as "Month D, YYYY".
+  * Missing `created_at` renders as "Undated".
+  * `_invert_date` is monotone-descending across full timestamps.
   * Same-date publications are ordered by time-of-day (newest first).
   * Same-second publications fall back to title (A->Z) as a stable tiebreaker.
-  * `_invert_date` is monotone-descending across full timestamps.
 
 The ongo-site script has no `.py` extension, so we load it as a module via
 ``importlib.util``.
@@ -51,31 +51,30 @@ class SortByDateTimeTests(unittest.TestCase):
             inv("2026-05-29 23:59:59"),
         )
 
-    def test_derive_item_date_from_ken_timestamp(self):
+    def test_date_label_renders_ken_timestamp(self):
         # ken's `datetime('now')` default always produces this shape.
-        sort_ts, label = self.os.derive_item_date("2026-05-30 14:30:45")
-        self.assertEqual(sort_ts, "2026-05-30 14:30:45")
-        self.assertEqual(label, "May 30, 2026")
+        self.assertEqual(
+            self.os._date_label("2026-05-30 14:30:45"),
+            "May 30, 2026",
+        )
 
-    def test_derive_item_date_january(self):
+    def test_date_label_january(self):
         # Verify the month-name lookup at the lower bound.
-        _, label = self.os.derive_item_date("2026-01-05 00:00:00")
-        self.assertEqual(label, "January 5, 2026")
+        self.assertEqual(
+            self.os._date_label("2026-01-05 00:00:00"),
+            "January 5, 2026",
+        )
 
-    def test_derive_item_date_december(self):
+    def test_date_label_december(self):
         # Verify the month-name lookup at the upper bound.
-        _, label = self.os.derive_item_date("2026-12-31 23:59:59")
-        self.assertEqual(label, "December 31, 2026")
+        self.assertEqual(
+            self.os._date_label("2026-12-31 23:59:59"),
+            "December 31, 2026",
+        )
 
-    def test_derive_item_date_missing_falls_back_to_undated(self):
-        sort_ts, label = self.os.derive_item_date(None)
-        self.assertEqual(sort_ts, "0000-00-00 00:00:00")
-        self.assertEqual(label, "Undated")
-
-    def test_derive_item_date_empty_falls_back_to_undated(self):
-        sort_ts, label = self.os.derive_item_date("")
-        self.assertEqual(sort_ts, "0000-00-00 00:00:00")
-        self.assertEqual(label, "Undated")
+    def test_date_label_missing_is_undated(self):
+        self.assertEqual(self.os._date_label(None), "Undated")
+        self.assertEqual(self.os._date_label(""), "Undated")
 
     def test_same_day_items_sort_by_time(self):
         items = [
@@ -133,6 +132,18 @@ class SortByDateTimeTests(unittest.TestCase):
             [i["display"] for i in ordered],
             ["today-late", "today-early", "yesterday-late"],
         )
+
+    def test_missing_created_at_sinks_to_bottom(self):
+        # The "0000-00-00 00:00:00" sentinel used at the call site for a
+        # row whose created_at is missing must inverse-sort to the END
+        # of the global newest-first list (i.e. its inverted key is
+        # lexicographically LARGEST).
+        inv = self.os._invert_date
+        sentinel_inv = inv("0000-00-00 00:00:00")
+        recent_inv = inv("2026-05-30 14:30:00")
+        old_inv = inv("1990-01-01 00:00:00")
+        self.assertGreater(sentinel_inv, recent_inv)
+        self.assertGreater(sentinel_inv, old_inv)
 
 
 if __name__ == "__main__":
